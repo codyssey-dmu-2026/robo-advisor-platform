@@ -24,9 +24,9 @@ class OptimizeRequest(BaseModel):
     risk_override: Optional[bool] = Field(default=True, description="RiskTag 연동 여부")
 
 class ExplainRequest(BaseModel):
-    strategy: str = Field(default="toy_policy", description="전략 이름 (예: toy_policy, mvo, equal_weight)")
-    window: str = Field(default="WF2022", description="Walk-Forward 윈도우 (WF2022~WF2025)")
-    decision_id: Optional[str] = Field(default=None, description="특정 의사결정 ID 또는 날짜")
+    run_id: str = Field(..., description="실행 ID")
+    decision_id: str = Field(..., description="의사결정 ID")
+    target_asset: str = Field(..., description="대상 자산 티커")
 
 class ResearchRequest(BaseModel):
     question: str = Field(default="엔비디아 2024년 실적 발표", description="투자 리서치 질문")

@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import plotly.express as px
 
-# 이제 대시보드는 오직 8080 통합 API Gateway 하나만 바라봅니다!
 GATEWAY_URL = "http://127.0.0.1:8080"
 
 st.set_page_config(
@@ -39,25 +38,12 @@ with st.sidebar:
     except Exception as e:
         st.error(f"API Gateway (8080) 오프라인: {e}")
 
-# 백테스트 결과 캐싱 조회 (GET /backtest)
 @st.cache_data(ttl=15)
 def get_backtest_data():
     resp = requests.get(f"{GATEWAY_URL}/backtest", timeout=5)
     resp.raise_for_status()
     return resp.json()
 
-# JSON 안에서 재귀적으로 테이블 형태(리스트/딕셔너리)를 찾아 DataFrame으로 변환하는 헬퍼 함수
-def json_to_df(obj):
-    if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict):
-        return pd.DataFrame(obj)
-    if isinstance(obj, dict):
-        # 딕셔너리의 값들이 또 딕셔너리인 경우 (예: 전략별 지표)
-        if all(isinstance(v, dict) for v in obj.values()) and len(obj) > 0:
-            return pd.DataFrame(obj).T
-        return pd.DataFrame([obj])
-    return None
-
-# --- 6개 필수 탭 구성 ---
 tabs = st.tabs([
     "1. 포트폴리오 현황",
     "2. 강화학습 성과",
@@ -68,11 +54,10 @@ tabs = st.tabs([
 ])
 
 # ==========================================
-# [탭 1] 포트폴리오 현황 (POST /optimize 연동)
+# [탭 1] 포트폴리오 현황 (POST /optimize)
 # ==========================================
 with tabs[0]:
     st.subheader("📊 실시간 최적 포트폴리오 자산 배분 (`POST /optimize`)")
-
     default_tickers = ["000660", "005930", "069500", "148070", "AAPL", "GLD", "MSFT", "NVDA", "QQQ", "SPY", "TLT", "VNQ"]
     selected_tickers = st.multiselect("최적화 대상 자산 유니버스 (12종)", options=default_tickers, default=default_tickers)
 
@@ -102,71 +87,100 @@ with tabs[0]:
             st.error(f"Gateway 통신 에러: {e}")
 
 # ==========================================
-# [탭 2] 강화학습 성과 (GET /backtest 연동)
+# [탭 2] 강화학습 성과 (GET /backtest)
 # ==========================================
 with tabs[1]:
     st.subheader("📈 Walk-Forward 백테스트 및 12개 성과 지표 (`GET /backtest`)")
     try:
         bt_data = get_backtest_data()
-        st.success("Gateway(8080)를 통해 백테스트 평가 아티팩트를 로드했습니다.")
+        runs = bt_data.get("runs", {})
 
-        # 최상위 키들 중 성과 지표(metrics, strategies, windows 등) 자동 표 변환
-        rendered_any = False
-        for key, val in bt_data.items():
-            if key in ["anova", "statistics", "stats"]:
+        rows = []
+        for run_key, run_val in runs.items():
+            metrics = run_val.get("metrics")
+            if not metrics:
                 continue
-            df_candidate = json_to_df(val)
-            if df_candidate is not None and not df_candidate.empty:
-                st.markdown(f"#### 📌 `{key}` 요약 테이블")
-                st.dataframe(df_candidate, use_container_width=True)
-                rendered_any = True
+            row = {
+                "Run ID": run_key,
+                "전략(Strategy)": run_val.get("strategy"),
+                "구간(Fold)": run_val.get("fold_id"),
+                "관측일수": run_val.get("n_observations")
+            }
+            for m_name, m_obj in metrics.items():
+                row[m_name] = m_obj.get("value") if isinstance(m_obj, dict) else m_obj
+            rows.append(row)
 
-                # 숫자형 컬럼이 있으면 막대 차트로도 시각화
-                num_cols = df_candidate.select_dtypes(include=["float64", "int64"]).columns
-                if len(num_cols) > 0:
-                    selected_metric = st.selectbox(f"[{key}] 차트로 비교할 지표 선택", options=num_cols, key=f"sel_{key}")
-                    st.bar_chart(df_candidate[selected_metric])
+        if rows:
+            df_runs = pd.DataFrame(rows)
+            st.markdown("#### 📋 Walk-Forward 윈도우별 12개 성과 지표 요약표")
+            st.dataframe(df_runs.style.format(precision=4), use_container_width=True)
 
+            metric_cols = [c for c in df_runs.columns if c not in ["Run ID", "전략(Strategy)", "구간(Fold)", "관측일수"]]
+            sel_metric = st.selectbox("📊 시각화로 비교할 성과 지표 선택", options=metric_cols, index=metric_cols.index("sharpe") if "sharpe" in metric_cols else 0)
+
+            fig_bt = px.bar(
+                df_runs, x="구간(Fold)", y=sel_metric, color="전략(Strategy)",
+                barmode="group", title=f"구간 및 전략별 {sel_metric} 비교"
+            )
+            st.plotly_chart(fig_bt, use_container_width=True)
         with st.expander("원본 백테스트 JSON 전체 보기"):
             st.json(bt_data)
     except Exception as e:
         st.warning(f"백테스트 데이터를 불러오지 못했습니다: {e}")
 
 # ==========================================
-# [탭 3] SHAP 해석 (POST /explain 연동)
+# [탭 3] SHAP 해석 (POST /explain)
 # ==========================================
 with tabs[2]:
     st.subheader("🔍 SHAP 기반 의사결정 해석 (`POST /explain`)")
+    st.caption("특정 시점(Decision ID)에서 각 피처 그룹(수익률·기술적지표·리스크)이 자산 비중 결정에 미친 기여도를 분석합니다.")
+
     col1, col2, col3 = st.columns(3)
-    strategy = col1.selectbox("전략 선택", ["toy_policy", "mvo", "equal_weight"])
-    window = col2.selectbox("Walk-Forward 윈도우", ["WF2022", "WF2023", "WF2024", "WF2025"])
-    decision_id = col3.text_input("특정 의사결정 ID / 날짜 (비워두면 기본값)", value="")
+    run_id = col1.selectbox("Run ID (`run_id`)", options=["toy_policy"])
+    decision_id = col2.selectbox("의사결정 ID (`decision_id`)", options=["toy0", "toy1", "toy2"])
+    target_asset = col3.selectbox("대상 자산 (`target_asset`)", options=[f"SYN0{i}" for i in range(10)])
 
     if st.button("SHAP 기여도 분석 조회", type="primary"):
-        payload = {"strategy": strategy, "window": window}
-        if decision_id.strip():
-            payload["decision_id"] = decision_id.strip()
+        payload = {"run_id": run_id, "decision_id": decision_id, "target_asset": target_asset}
         try:
             res = requests.post(f"{GATEWAY_URL}/explain", json=payload, timeout=5)
             if res.status_code == 200:
-                exp_data = res.json()
-                st.success("SHAP 의사결정 해석 로드 완료!")
+                exp = res.json()
+                st.success(f"`{run_id}` / `{decision_id}` / `{target_asset}` SHAP 해석 로드 성공!")
 
-                # 피처 기여도(feature importance / shap values)가 있으면 차트로 표시
-                for k, v in exp_data.items():
-                    df_shap = json_to_df(v)
-                    if df_shap is not None and not df_shap.empty:
-                        st.markdown(f"#### 📊 `{k}` 피처별 기여도")
-                        st.dataframe(df_shap, use_container_width=True)
-                with st.expander("SHAP 응답 상세 JSON"):
-                    st.json(exp_data)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("기본 비중 (Base Value)", f"{exp.get('base_value', 0):.4%}")
+                m2.metric("예측 비중 (Predicted Weight)", f"{exp.get('predicted_weight', 0):.4%}")
+                m3.metric("합산 오차 (Additivity Error)", f"{exp.get('additivity_error', 0):.2e}")
+
+                # 피처 그룹별 SHAP 값 막대차트 시각화
+                group_names = exp.get("group_names", ["returns", "indicators", "risk_inputs"])
+                shap_vals = exp.get("shap_values") or exp.get("attributions") or exp.get("group_shap_values")
+                if isinstance(shap_vals, dict):
+                    df_shap = pd.DataFrame(list(shap_vals.items()), columns=["피처 그룹", "SHAP 기여도"])
+                elif isinstance(shap_vals, list) and len(shap_vals) == len(group_names):
+                    df_shap = pd.DataFrame({"피처 그룹": group_names, "SHAP 기여도": shap_vals})
+                else:
+                    df_shap = None
+
+                if df_shap is not None:
+                    fig_shap = px.bar(
+                        df_shap, x="SHAP 기여도", y="피처 그룹", orientation="h",
+                        color="SHAP 기여도", color_continuous_scale="RdBu_r",
+                        title=f"{target_asset} 비중 결정에 대한 피처 그룹별 SHAP 기여도"
+                    )
+                    st.plotly_chart(fig_shap, use_container_width=True)
+                    st.dataframe(df_shap, use_container_width=True)
+
+                with st.expander("SHAP 응답 원본 JSON 보기", expanded=False):
+                    st.json(exp)
             else:
                 st.warning(f"응답 코드 {res.status_code}: {res.text}")
         except Exception as e:
             st.error(f"호출 실패: {e}")
 
 # ==========================================
-# [탭 4] 에이전트 리서치 (POST /research 연동)
+# [탭 4] 에이전트 리서치 (POST /research)
 # ==========================================
 with tabs[3]:
     st.subheader("📰 LangGraph 에이전틱 투자 리서치 (`POST /research`)")
@@ -200,23 +214,16 @@ with tabs[3]:
                         col_a, col_b = st.columns(2)
                         with col_a:
                             st.markdown("#### 🧠 에이전트 추론 과정 (Reasoning Trace)")
-                            trace_list = r.get("trace", [])
-                            if trace_list:
-                                st.dataframe(pd.DataFrame(trace_list), use_container_width=True)
-                            else:
-                                st.write("추론 로그 없음")
+                            if r.get("trace"):
+                                st.dataframe(pd.DataFrame(r["trace"]), use_container_width=True)
                         with col_b:
                             st.markdown("#### 🔗 검증된 원문 출처 (Source Citations)")
-                            cit_list = r.get("citations", [])
-                            if cit_list:
-                                st.dataframe(pd.DataFrame(cit_list), use_container_width=True)
-                            else:
-                                st.write("인용된 문서 없음")
+                            if r.get("citations"):
+                                st.dataframe(pd.DataFrame(r["citations"]), use_container_width=True)
 
                         st.markdown("#### 🚨 시점 유효 리스크 태그 (`risk_tags`)")
-                        rt_list = r.get("risk_tags", [])
-                        if rt_list:
-                            st.dataframe(pd.DataFrame(rt_list), use_container_width=True)
+                        if r.get("risk_tags"):
+                            st.dataframe(pd.DataFrame(r["risk_tags"]), use_container_width=True)
                         else:
                             st.caption("해당 시점에 활성화된 리스크 태그가 없습니다.")
                     else:
@@ -225,27 +232,33 @@ with tabs[3]:
                     st.error(f"통신 실패: {e}")
 
 # ==========================================
-# [탭 5] ANOVA 검증 결과 (GET /backtest 연동)
+# [탭 5] ANOVA 검증 결과 (GET /backtest)
 # ==========================================
 with tabs[4]:
-    st.subheader("📐 ANOVA 통계 검증 (F-통계량, p-value, 효과 크기 η², Tukey HSD)")
+    st.subheader("📐 ANOVA 통계적 유의성 검증 및 Paired Block Bootstrap")
     try:
         bt_data = get_backtest_data()
-        stats_section = bt_data.get("anova") or bt_data.get("statistics") or bt_data.get("stats")
-        if stats_section:
-            if isinstance(stats_section, dict):
-                for k, v in stats_section.items():
-                    st.markdown(f"#### 🧪 `{k}` 검증 결과")
-                    df_s = json_to_df(v)
-                    if df_s is not None:
-                        st.dataframe(df_s, use_container_width=True)
-                    else:
-                        st.json(v)
-            else:
-                st.json(stats_section)
-        else:
-            st.info("백테스트 JSON 내 전체 통계 데이터를 표시합니다.")
-            st.json(bt_data)
+        anova_comp = bt_data.get("synthetic_baseline_comparison", {})
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 1️⃣ 일원분산분석 (ANOVA) 효과 검정")
+            effects = anova_comp.get("effects", [])
+            if effects:
+                st.dataframe(pd.DataFrame(effects), use_container_width=True)
+            diag = anova_comp.get("diagnostics", {})
+            st.caption(f"등분산성(Levene p): `{diag.get('levene_p', 0):.4f}` | 정규성(Shapiro p): `{diag.get('shapiro_residual_p', 0):.4f}`")
+
+        with col2:
+            st.markdown("#### 2️⃣ 블록 부트스트랩 (Paired Circular Block Bootstrap)")
+            boot = bt_data.get("bootstrap", [])
+            if boot:
+                st.dataframe(pd.DataFrame(boot), use_container_width=True)
+
+        st.markdown("#### 3️⃣ 3대 미션 ANOVA 상태 (`mission_anova`)")
+        mission = bt_data.get("mission_anova", {})
+        if mission:
+            st.dataframe(pd.DataFrame(mission).T, use_container_width=True)
     except Exception as e:
         st.warning(f"통계 데이터 조회 실패: {e}")
 
@@ -254,13 +267,31 @@ with tabs[4]:
 # ==========================================
 with tabs[5]:
     st.subheader("🚨 실시간 리스크 모니터링 및 Safe-Guard (MDD 15% 제한)")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("포트폴리오 현재 MDD", "-8.20%", "Safe-Guard 한도: -15.0% (여유 6.8%p)")
-    c2.metric("일간 VaR (95%)", "-2.14%", "정상 범위")
-    c3.metric("일간 CVaR (95%)", "-3.42%", "정상 범위")
+    try:
+        bt_data = get_backtest_data()
+        runs = bt_data.get("runs", {})
+        run_options = [k for k, v in runs.items() if "metrics" in v]
+        sel_run = st.selectbox("모니터링할 백테스트 포트폴리오 선택", options=run_options, index=len(run_options)-1 if run_options else 0)
 
-    st.progress(int((8.2 / 15.0) * 100), text="MDD 한도 소진율: 54.6% (-8.2% / -15.0%)")
-    st.success("🟢 **Safe-Guard 정상 작동 중**: 현재 MDD가 임계값(15%) 미만이므로 자율 거래를 유지합니다.")
+        m_dict = runs[sel_run]["metrics"]
+        curr_mdd = m_dict["mdd"]["value"] * 100
+        curr_var = m_dict["var_95"]["value"] * 100
+        curr_cvar = m_dict["cvar_95"]["value"] * 100
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("선택 구간 MDD (최대낙폭)", f"-{curr_mdd:.2f}%", "Safe-Guard 임계값: -15.00%")
+        c2.metric("일간 VaR (95%)", f"-{curr_var:.2f}%")
+        c3.metric("일간 CVaR (95%)", f"-{curr_cvar:.2f}%")
+
+        ratio = min(int((curr_mdd / 15.0) * 100), 100)
+        st.progress(ratio, text=f"MDD Safe-Guard 한도 소진율: {ratio}% (현재 -{curr_mdd:.2f}% / 한도 -15.00%)")
+
+        if curr_mdd >= 15.0:
+            st.error("🔴 **Safe-Guard 발동 (MDD ≥ 15%)**: 손실 한도를 초과하여 위험자산 비중을 축소하고 거래를 중단합니다!")
+        else:
+            st.success("🟢 **Safe-Guard 정상 운용 중 (MDD < 15%)**: 포트폴리오 낙폭이 안전 범위 내에 있습니다.")
+    except Exception as e:
+        st.info(f"백테스트 지표 연동 대기 중: {e}")
 
 st.divider()
 st.caption(
