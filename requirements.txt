@@ -1,0 +1,9 @@
+﻿fastapi
+uvicorn
+httpx
+pydantic
+streamlit
+requests
+pandas
+plotly
+pytest
