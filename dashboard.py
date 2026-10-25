@@ -2,8 +2,9 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
+import os
 
-GATEWAY_URL = "http://127.0.0.1:8080"
+GATEWAY_URL = os.getenv("GATEWAY_URL", "http://127.0.0.1:8080")
 
 st.set_page_config(
     page_title="통합 자율 로보어드바이저",

@@ -1,0 +1,89 @@
+services:
+  # 1. Evaluation & XAI Service (Port 8000)
+  evaluation-xai:
+    build:
+      context: ../evaluation-xai
+      dockerfile: Dockerfile
+    container_name: robo-eval-xai
+    ports:
+      - "8000:8000"
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+  # 2. Agentic Research Service (Port 8001)
+  agentic-research:
+    build:
+      context: ../agentic-research
+      dockerfile: Dockerfile
+    container_name: robo-agentic-research
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../data-pipeline/data/raw/news:/data/raw/news:ro
+      - ../data-pipeline/data/processed:/data/processed:ro
+    environment:
+      - NEWS_DIR=/data/raw/news
+      - PROCESSED_DIR=/data/processed
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+  # 3. RL Optimization Serving Service (Port 8002)
+  rl-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: robo-rl-server
+    command: uvicorn rl_server:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    volumes:
+      - ../rl-engine:/rl-engine:ro
+    environment:
+      - RL_REPO_PATH=/rl-engine
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+  # 4. Unified API Gateway (Port 8080 - 5대 필수 엔드포인트 단일 진입점)
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: robo-api-gateway
+    command: uvicorn gateway:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    environment:
+      - EVAL_API_URL=http://evaluation-xai:8000
+      - AGENT_API_URL=http://agentic-research:8001
+      - RL_API_URL=http://rl-engine:8002
+    depends_on:
+      - evaluation-xai
+      - agentic-research
+      - rl-engine
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+  # 5. Streamlit Interactive Web Dashboard (Port 8501)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: robo-dashboard
+    command: streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - GATEWAY_URL=http://api-gateway:8080
+    depends_on:
+      - api-gateway
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+networks:
+  robo-net:
+    driver: bridge
