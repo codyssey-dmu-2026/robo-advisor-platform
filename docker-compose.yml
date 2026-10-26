@@ -7,6 +7,9 @@ services:
     container_name: robo-eval-xai
     ports:
       - "8000:8000"
+    volumes:
+      # XAI 서버가 로컬의 artifacts 폴더(evaluation.json)를 읽을 수 있도록 연결!
+      - ../evaluation-xai/artifacts:/app/artifacts:ro
     networks:
       - robo-net
     restart: unless-stopped
@@ -19,9 +22,12 @@ services:
     container_name: robo-agentic-research
     ports:
       - "8001:8001"
+    env_file:
+      - ../agentic-research/.env
     volumes:
       - ../data-pipeline/data/raw/news:/data/raw/news:ro
       - ../data-pipeline/data/processed:/data/processed:ro
+      - ../agentic-research/artifacts:/app/artifacts
     environment:
       - NEWS_DIR=/data/raw/news
       - PROCESSED_DIR=/data/processed
