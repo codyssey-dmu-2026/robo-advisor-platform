@@ -39,9 +39,13 @@
     ├── rl_server.py         # PPO 강화학습 모델 추론 및 Softmax 비중 서빙 서버 (Port 8002)
     ├── dashboard.py         # 6개 필수 탭 구성 Streamlit 웹 대시보드 (Port 8501)
     ├── tests/
-    │   └── test_api.py      # 5대 엔드포인트 규격, 422 방어, 5초 SLA 검증 유닛 테스트 (12개)
+    │   └── test_api.py      # 5대 엔드포인트 규격, 422 방어, 5초 SLA 검증 유닛 테스트 (14개)
+    ├── scripts/
+    │   └── build_images.py  # Windows용 이미지 빌드 헬퍼 (Compose git URL 빌드 버그 우회)
     ├── Dockerfile           # API 서빙 및 대시보드 컨테이너 이미지 빌드 명세
-    ├── docker-compose.yml   # 전체 마이크로서비스 통합 컨테이너 오케스트레이션
+    ├── docker-compose.yml   # 전체 통합 실행 (팀원 레포 커밋 고정 빌드 + bootstrap)
+    ├── docker-compose.local.yml  # 개발용: 형제 폴더(../) 코드로 빌드
+    ├── .env.example         # 설정·선택 키 템플릿
     ├── requirements.txt     # 의존성 패키지 목록
     └── README.md
 
@@ -88,11 +92,35 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
     # 3. Streamlit 대시보드 (8501) 실행
     python -m streamlit run dashboard.py
 
-### B. Docker Compose 일괄 실행
+### B. Docker Compose 일괄 실행 (권장)
 
-상위 디렉토리에 `data-pipeline`, `evaluation-xai`, `agentic-research`, `rl-engine`, `robo-advisor-platform`이 나란히 위치한 상태에서 실행합니다.
+이 레포만 clone하면 됩니다. 팀원 서비스는 GitHub 레포를 **커밋 고정**으로 빌드합니다.
 
-    docker compose up --build
+    cp .env.example .env        # 선택: DART 키·SEC 연락처·OpenAI 키 (비워 두면 키 없이 동작)
+    docker compose up --build   # Linux / macOS
+
+Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼로 먼저 빌드합니다.
+
+    python scripts/build_images.py
+    docker compose up
+
+첫 실행 시 bootstrap 컨테이너가 팀원 코드로 데이터를 직접 만들고(수 분 소요), 두 번째부터는 건너뜁니다.
+
+| 순서 | 컨테이너 | 하는 일 |
+|---|---|---|
+| 1 | `data-bootstrap` | data-pipeline: 가격 수집(yfinance/pykrx) → 전처리 → 뉴스·공시 수집(SEC, 한국경제 RSS, DART는 키 있을 때) |
+| 2 | `agent-bootstrap` | agentic-research: 뉴스 → ChromaDB 적재, RiskTag 생성 |
+| 3 | `eval-bootstrap` | evaluation-xai: 평가 산출물 생성 (현재 synthetic 데모) |
+
+- 뉴스 데이터는 재배포 금지라 git에 올리지 않고 실행 환경마다 직접 수집합니다.
+- 다시 수집하려면 `.env`에 `BOOTSTRAP_FORCE=1`, 완전 초기화는 `docker compose down -v`.
+
+### C. 개발 모드 (형제 폴더의 작업 중 코드로 빌드)
+
+상위 폴더에 `data-pipeline`, `evaluation-xai`, `agentic-research`, `rl-engine`, `robo-advisor-platform`이 나란히 있을 때:
+
+    python scripts/build_images.py --local
+    docker compose -f docker-compose.yml -f docker-compose.local.yml up
 
 ---
 
