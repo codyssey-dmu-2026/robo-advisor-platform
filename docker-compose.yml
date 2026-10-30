@@ -10,6 +10,9 @@ services:
     volumes:
       # XAI 서버가 로컬의 artifacts 폴더(evaluation.json)를 읽을 수 있도록 연결!
       - ../evaluation-xai/artifacts:/app/artifacts:ro
+    environment:
+      # 읽을 산출물 폴더를 명시 (기본값과 동일하지만 설정을 코드 밖으로 분리)
+      - EVALUATION_ARTIFACT_DIR=${EVALUATION_ARTIFACT_DIR:-/app/artifacts/demo}
     networks:
       - robo-net
     restart: unless-stopped
@@ -23,14 +26,20 @@ services:
     ports:
       - "8001:8001"
     env_file:
-      - ../agentic-research/.env
+      # .env가 없으면 키 없이 동작하는 rule/hash 기본값으로 기동
+      - path: ../agentic-research/.env
+        required: false
     volumes:
-      - ../data-pipeline/data/raw/news:/data/raw/news:ro
-      - ../data-pipeline/data/processed:/data/processed:ro
+      # 서비스 설정(AGENT_*)이 가리키는 /app/data 경로에 data-pipeline 산출물을 읽기 전용으로 연결
+      - ../data-pipeline/data/raw/news:/app/data/raw/news:ro
+      - ../data-pipeline/data/processed:/app/data/processed:ro
       - ../agentic-research/artifacts:/app/artifacts
     environment:
-      - NEWS_DIR=/data/raw/news
-      - PROCESSED_DIR=/data/processed
+      # .env의 상대경로 값보다 우선 적용되도록 컨테이너 절대경로로 고정
+      - AGENT_NEWS_DIR=/app/data/raw/news
+      - AGENT_RETURNS_PATH=/app/data/processed/returns.parquet
+      - AGENT_CHROMA_DIR=/app/artifacts/chroma
+      - AGENT_RISK_TAGS_PATH=/app/artifacts/risk_tags.jsonl
     networks:
       - robo-net
     restart: unless-stopped
