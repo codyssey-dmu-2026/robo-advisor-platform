@@ -1,62 +1,181 @@
+# 통합 로보어드바이저 일괄 실행 (제출·채점용)
+#   docker compose up --build
+# - 팀원 서비스는 GitHub 레포를 커밋 고정으로 빌드한다 (platform 레포만 clone하면 됨)
+# - 데이터·벡터DB·평가 산출물은 git에 없으므로(뉴스 재배포 금지) bootstrap 컨테이너가
+#   팀원 코드로 직접 생성해 named volume에 저장한다. 두 번째 실행부터는 건너뛴다
+# - 로컬 형제 폴더(../)의 작업 중 코드로 빌드하려면 docker-compose.local.yml을 함께 사용
+#
+# 팀원 레포 커밋 고정값 (갱신 시 아래 build.context의 #<sha>를 함께 변경)
+#   agentic-research  bdd5b84 / evaluation-xai 94bca46 / data-pipeline 0bbd15f
+
+x-health: &health
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 10s
+
 services:
+  # ---------------------------------------------------------------
+  # Bootstrap 1. data-pipeline: 가격 수집 → 전처리 → 뉴스/공시 수집 → 이상치 리포트
+  #   키가 없어도 가격·SEC·한국경제 RSS는 수집되고 DART만 건너뛴다
+  # ---------------------------------------------------------------
+  data-bootstrap:
+    build:
+      context: https://github.com/codyssey-dmu-2026/data-pipeline.git#0bbd15f0f4bf93e616105d5782798f7e25c90c19
+      # data-pipeline 레포에는 Dockerfile이 없어 platform에서 정의 (README 권장 Python 3.12)
+      # .dockerignore가 없는 레포라 .env·.venv·data가 섞이지 않도록 소스(*.py)만 복사
+      # (빌드 정의를 PowerShell 파이프로 넘기므로 인라인 내용은 ASCII로 유지)
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY *.py ./
+    image: robo-data-pipeline:local
+    container_name: robo-data-bootstrap
+    environment:
+      DART_API_KEY: ${DART_API_KEY:-}
+      SEC_EDGAR_CONTACT_EMAIL: ${SEC_EDGAR_CONTACT_EMAIL:-}
+      BOOTSTRAP_FORCE: ${BOOTSTRAP_FORCE:-0}
+    command:
+      - sh
+      - -c
+      - |
+        if [ -f /app/data/processed/returns.parquet ] && [ "$$BOOTSTRAP_FORCE" != "1" ]; then
+          echo "[data-bootstrap] 기존 데이터 사용 (재수집: BOOTSTRAP_FORCE=1)"
+        else
+          python main.py
+        fi
+    volumes:
+      - pipeline-data:/app/data
+    networks:
+      - robo-net
+    restart: "no"
+
+  # ---------------------------------------------------------------
+  # Bootstrap 2. agentic-research: 뉴스 → ChromaDB 적재, RiskTag 생성
+  #   뉴스가 하나도 없으면 적재가 실패하지만 서비스 기동은 막지 않는다 (/research가 503 반환)
+  # ---------------------------------------------------------------
+  agent-bootstrap:
+    build: &agent-build
+      context: https://github.com/codyssey-dmu-2026/agentic-research.git#bdd5b84df154ad84ec10ee60a7ecaba5c3fab61d
+      dockerfile: Dockerfile
+    image: robo-agentic-research:local
+    container_name: robo-agent-bootstrap
+    environment: &agent-env
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # 적재와 서빙이 같은 임베딩을 써야 하므로 두 컨테이너가 같은 값을 공유
+      AGENT_LLM_PROVIDER: ${AGENT_LLM_PROVIDER:-rule}
+      AGENT_EMBEDDING_PROVIDER: ${AGENT_EMBEDDING_PROVIDER:-hash}
+      AGENT_NEWS_DIR: /app/data/raw/news
+      AGENT_RETURNS_PATH: /app/data/processed/returns.parquet
+      AGENT_CHROMA_DIR: /app/artifacts/chroma
+      AGENT_RISK_TAGS_PATH: /app/artifacts/risk_tags.jsonl
+      BOOTSTRAP_FORCE: ${BOOTSTRAP_FORCE:-0}
+    command:
+      - sh
+      - -c
+      - |
+        if [ -f /app/artifacts/risk_tags.jsonl ] && [ "$$BOOTSTRAP_FORCE" != "1" ]; then
+          echo "[agent-bootstrap] 기존 벡터DB·RiskTag 사용 (재생성: BOOTSTRAP_FORCE=1)"
+          exit 0
+        fi
+        python -m agentic_research.ingest || echo "[agent-bootstrap] 경고: 뉴스 적재 실패 (뉴스 CSV 없음?)"
+        python -m agentic_research.risk || echo "[agent-bootstrap] 경고: RiskTag 생성 실패"
+    volumes:
+      - pipeline-data:/app/data:ro
+      - agent-artifacts:/app/artifacts
+    depends_on:
+      data-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - robo-net
+    restart: "no"
+
+  # ---------------------------------------------------------------
+  # Bootstrap 3. evaluation-xai: 오프라인 평가 산출물 생성
+  #   현재는 synthetic 데모(실제 PPO 결과 아님). rl-engine 결과 연동 후 교체 예정
+  # ---------------------------------------------------------------
+  eval-bootstrap:
+    build: &eval-build
+      context: https://github.com/codyssey-dmu-2026/evaluation-xai.git#94bca463441354ddcaac87857698053fad0fd592
+      dockerfile: Dockerfile
+    image: robo-evaluation-xai:local
+    container_name: robo-eval-bootstrap
+    command:
+      - sh
+      - -c
+      - |
+        if [ -f /app/artifacts/demo/evaluation.json ]; then
+          echo "[eval-bootstrap] 기존 평가 산출물 사용"
+        else
+          python -m evaluation_xai demo --output /app/artifacts/demo --with-shap
+        fi
+    volumes:
+      - eval-artifacts:/app/artifacts
+    networks:
+      - robo-net
+    restart: "no"
+
   # 1. Evaluation & XAI Service (Port 8000)
   evaluation-xai:
-    build:
-      context: ../evaluation-xai
-      dockerfile: Dockerfile
+    build: *eval-build
+    image: robo-evaluation-xai:local
     container_name: robo-eval-xai
     ports:
       - "8000:8000"
     volumes:
-      # XAI 서버가 로컬의 artifacts 폴더(evaluation.json)를 읽을 수 있도록 연결!
-      - ../evaluation-xai/artifacts:/app/artifacts:ro
+      - eval-artifacts:/app/artifacts:ro
     environment:
-      # 읽을 산출물 폴더를 명시 (기본값과 동일하지만 설정을 코드 밖으로 분리)
-      - EVALUATION_ARTIFACT_DIR=${EVALUATION_ARTIFACT_DIR:-/app/artifacts/demo}
+      EVALUATION_ARTIFACT_DIR: ${EVALUATION_ARTIFACT_DIR:-/app/artifacts/demo}
+    depends_on:
+      eval-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      <<: *health
     networks:
       - robo-net
     restart: unless-stopped
 
   # 2. Agentic Research Service (Port 8001)
   agentic-research:
-    build:
-      context: ../agentic-research
-      dockerfile: Dockerfile
+    build: *agent-build
+    image: robo-agentic-research:local
     container_name: robo-agentic-research
     ports:
       - "8001:8001"
-    env_file:
-      # .env가 없으면 키 없이 동작하는 rule/hash 기본값으로 기동
-      - path: ../agentic-research/.env
-        required: false
+    environment: *agent-env
     volumes:
-      # 서비스 설정(AGENT_*)이 가리키는 /app/data 경로에 data-pipeline 산출물을 읽기 전용으로 연결
-      - ../data-pipeline/data/raw/news:/app/data/raw/news:ro
-      - ../data-pipeline/data/processed:/app/data/processed:ro
-      - ../agentic-research/artifacts:/app/artifacts
-    environment:
-      # .env의 상대경로 값보다 우선 적용되도록 컨테이너 절대경로로 고정
-      - AGENT_NEWS_DIR=/app/data/raw/news
-      - AGENT_RETURNS_PATH=/app/data/processed/returns.parquet
-      - AGENT_CHROMA_DIR=/app/artifacts/chroma
-      - AGENT_RISK_TAGS_PATH=/app/artifacts/risk_tags.jsonl
+      - pipeline-data:/app/data:ro
+      - agent-artifacts:/app/artifacts
+    depends_on:
+      agent-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      <<: *health
     networks:
       - robo-net
     restart: unless-stopped
 
   # 3. RL Optimization Serving Service (Port 8002)
+  #   rl-engine 모델 연동 전까지 시뮬레이션 응답(is_mock=true)
   rl-engine:
     build:
       context: .
       dockerfile: Dockerfile
+    image: robo-platform:local
     container_name: robo-rl-server
     command: uvicorn rl_server:app --host 0.0.0.0 --port 8002
     ports:
       - "8002:8002"
-    volumes:
-      - ../rl-engine:/rl-engine:ro
     environment:
-      - RL_REPO_PATH=/rl-engine
+      RL_REPO_PATH: /rl-engine
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      <<: *health
     networks:
       - robo-net
     restart: unless-stopped
@@ -66,18 +185,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: robo-platform:local
     container_name: robo-api-gateway
     command: uvicorn gateway:app --host 0.0.0.0 --port 8080
     ports:
       - "8080:8080"
     environment:
-      - EVAL_API_URL=http://evaluation-xai:8000
-      - AGENT_API_URL=http://agentic-research:8001
-      - RL_API_URL=http://rl-engine:8002
+      EVAL_API_URL: http://evaluation-xai:8000
+      AGENT_API_URL: http://agentic-research:8001
+      RL_API_URL: http://rl-engine:8002
     depends_on:
-      - evaluation-xai
-      - agentic-research
-      - rl-engine
+      evaluation-xai:
+        condition: service_healthy
+      agentic-research:
+        condition: service_healthy
+      rl-engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      <<: *health
     networks:
       - robo-net
     restart: unless-stopped
@@ -87,17 +213,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: robo-platform:local
     container_name: robo-dashboard
     command: streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0
     ports:
       - "8501:8501"
     environment:
-      - GATEWAY_URL=http://api-gateway:8080
+      GATEWAY_URL: http://api-gateway:8080
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_healthy
     networks:
       - robo-net
     restart: unless-stopped
+
+volumes:
+  pipeline-data:
+  agent-artifacts:
+  eval-artifacts:
 
 networks:
   robo-net:
