@@ -138,3 +138,28 @@ def test_12_gateway_backtest_routing_and_sla():
     assert res.status_code in (200, 503)
     if res.status_code == 200:
         assert "runs" in res.json()
+
+# =====================================================================
+# Part 3. 통합 버그 회귀 테스트
+# =====================================================================
+
+def test_13_gateway_health_parallel_when_services_offline(monkeypatch):
+    """13. 하위 서비스가 모두 응답하지 않아도 /health가 병렬 확인으로 3초 안에 응답하는지 검증"""
+    import gateway
+    # 연결되지 않는 주소(TEST-NET-1)로 바꿔 타임아웃을 유도
+    for name in ("EVAL_API_URL", "AGENT_API_URL", "RL_API_URL"):
+        monkeypatch.setattr(gateway, name, "http://192.0.2.1:9")
+    monkeypatch.setattr(gateway, "HEALTH_TIMEOUT_S", 1.0)
+    start = time.perf_counter()
+    res = gateway_client.get("/health")
+    elapsed = time.perf_counter() - start
+    assert res.status_code == 200
+    assert elapsed < 3.0, f"순차 호출 의심: {elapsed:.2f}s"
+    assert all(s["status"] in ("offline", "error") for s in res.json()["services"].values())
+
+
+def test_14_rl_mock_response_is_flagged_with_disclaimer():
+    """14. 실제 PPO 연동 전 응답에 mock 표시와 금융 면책 문구가 포함되는지 검증"""
+    data = rl_client.post("/optimize", json={"tickers": ["SPY", "TLT"]}).json()
+    assert data["is_mock"] is True
+    assert "투자 조언" in data["disclaimer"]

@@ -72,6 +72,9 @@ with tabs[0]:
             if res.status_code == 200:
                 opt_data = res.json()
                 weights = opt_data.get("weights", {})
+                # 실제 PPO 추론이 아닌 응답(Gateway fallback, rl_server 시뮬레이션)은 화면에 명시
+                if opt_data.get("status") != "ok" or opt_data.get("is_mock"):
+                    st.warning(f"⚠️ 실제 PPO 추론 결과가 아닙니다 (status=`{opt_data.get('status')}`). 인터페이스 검증용 값입니다.")
                 df_w = pd.DataFrame(list(weights.items()), columns=["자산(Ticker)", "비중(Weight)"])
 
                 col1, col2 = st.columns([1.2, 1])
@@ -152,17 +155,19 @@ with tabs[2]:
                 m1, m2, m3 = st.columns(3)
                 m1.metric("기본 비중 (Base Value)", f"{exp.get('base_value', 0):.4%}")
                 m2.metric("예측 비중 (Predicted Weight)", f"{exp.get('predicted_weight', 0):.4%}")
-                m3.metric("합산 오차 (Additivity Error)", f"{exp.get('additivity_error', 0):.2e}")
+                m3.metric("해석 방법 (Method)", exp.get("method", "-"))
+                st.caption(f"데이터 모드: `{exp.get('data_mode', '-')}` | 단계: `{exp.get('stage', '-')}`")
+                if exp.get("interpretation"):
+                    st.info(exp["interpretation"])
 
-                # 피처 그룹별 SHAP 값 막대차트 시각화
-                group_names = exp.get("group_names", ["returns", "indicators", "risk_inputs"])
-                shap_vals = exp.get("shap_values") or exp.get("attributions") or exp.get("group_shap_values")
-                if isinstance(shap_vals, dict):
-                    df_shap = pd.DataFrame(list(shap_vals.items()), columns=["피처 그룹", "SHAP 기여도"])
-                elif isinstance(shap_vals, list) and len(shap_vals) == len(group_names):
+                # evaluation-xai /explain 응답 계약: groups[i] ↔ contributions[i]
+                group_names = exp.get("groups", [])
+                shap_vals = exp.get("contributions", [])
+                if group_names and len(shap_vals) == len(group_names):
                     df_shap = pd.DataFrame({"피처 그룹": group_names, "SHAP 기여도": shap_vals})
                 else:
                     df_shap = None
+                    st.warning("응답에 groups/contributions가 없거나 길이가 맞지 않아 차트를 그릴 수 없습니다.")
 
                 if df_shap is not None:
                     fig_shap = px.bar(

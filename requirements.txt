@@ -1,10 +1,11 @@
-﻿fastapi
-uvicorn
-httpx
-pydantic
-streamlit
-requests
-pandas
-numpy
-plotly
-pytest
+﻿# platform(Gateway·RL 서빙·대시보드) 런타임 의존성. Python 3.13 / 로컬 .venv에서 테스트 통과한 버전으로 고정
+fastapi==0.162.0
+uvicorn==0.54.0
+httpx==0.28.1
+pydantic==2.14.1
+streamlit==1.66.1
+requests==2.34.2
+pandas==3.1.0
+numpy==2.5.4
+plotly==7.1.0
+pytest==9.1.1

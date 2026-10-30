@@ -11,8 +11,8 @@ app = FastAPI(
     description="PPO 강화학습 모델 기반 실시간 자산 배분 추론 서버 (Port 8002)"
 )
 
-# 바탕화면의 rl-engine 폴더 경로 탐색
-RL_REPO_PATH = Path(os.getenv("RL_REPO_PATH", r"C:\Users\Hyeonho\Desktop\rl-engine"))
+# rl-engine 레포 경로 (기본값: platform과 나란히 있는 형제 폴더, 컨테이너에서는 환경변수로 지정)
+RL_REPO_PATH = Path(os.getenv("RL_REPO_PATH", Path(__file__).resolve().parent.parent / "rl-engine"))
 MODELS_DIR = RL_REPO_PATH / "models"
 
 class OptimizeRequest(BaseModel):
@@ -74,11 +74,14 @@ def optimize(req: OptimizeRequest):
     return {
         "status": "ok",
         "service": "rl-engine",
+        # 실제 PPO 모델 추론 전까지는 시뮬레이션임을 명시 (대시보드 경고 표시용)
+        "is_mock": True,
         "model_used": model_name,
         "as_of": req.as_of,
         "weights": weights_dict,
         "transaction_cost_bps": 1.5,
         "slippage_bps": 5.0,
         "safeguard_triggered": False,
-        "message": f"PPO 정책({model_name}) Softmax 추론 완료 (수수료 0.015%, 슬리피지 0.05% 반영)"
+        "message": f"[시뮬레이션] PPO 정책({model_name}) 연동 전 결정론적 Softmax 비중 (수수료 0.015%, 슬리피지 0.05% 명세값)",
+        "disclaimer": "본 결과는 교육 목적이며 실제 투자 조언에 사용할 수 없습니다. 백테스팅 성과는 미래 수익을 보장하지 않습니다."
     }
