@@ -12,8 +12,8 @@
            │
            ▼ (Port 8501)
     ┌─────────────────────────────────────────────────────────┐
-    │  Streamlit Web Dashboard (dashboard.py)                 │
-    │  - 6개 필수 탭 시각화 (Plotly / DataFrame)              │
+    │  Streamlit Web Dashboard (dashboard/app.py)             │
+    │  - 개요 + 6개 필수 페이지, 라이트/다크 테마 (Plotly)    │
     └─────────────────────────────────────────────────────────┘
            │ (HTTP REST API 통신 - 모델 직접 로드 금지 준수)
            ▼ (Port 8080)
@@ -37,9 +37,15 @@
     robo-advisor-platform/
     ├── gateway.py           # 5대 필수 엔드포인트 통합 FastAPI 게이트웨이 (Port 8080)
     ├── rl_server.py         # PPO 강화학습 모델 추론 및 Softmax 비중 서빙 서버 (Port 8002)
-    ├── dashboard.py         # 6개 필수 탭 구성 Streamlit 웹 대시보드 (Port 8501)
+    ├── dashboard/           # Streamlit 웹 대시보드 (Port 8501)
+    │   ├── app.py           # 진입점: 사이드바 내비게이션·시스템 상태·면책 조항
+    │   ├── views/           # 개요 + 6개 필수 페이지
+    │   ├── core/            # Gateway HTTP 클라이언트, 차트, 공통 UI, 자산 정보
+    │   └── static/          # 로고
+    ├── .streamlit/config.toml  # 라이트/다크 테마 (색각 이상 대비 검증 팔레트)
     ├── tests/
-    │   └── test_api.py      # 5대 엔드포인트 규격, 422 방어, 5초 SLA 검증 유닛 테스트 (14개)
+    │   ├── test_api.py      # 5대 엔드포인트 규격, 422 방어, 5초 SLA 검증 (14개)
+    │   └── test_dashboard.py  # 시계열 API, Gateway 오프라인 시 페이지 렌더링 검증 (9개)
     ├── scripts/
     │   └── build_images.py  # Windows용 이미지 빌드 헬퍼 (Compose git URL 빌드 버그 우회)
     ├── Dockerfile           # API 서빙 및 대시보드 컨테이너 이미지 빌드 명세
@@ -62,17 +68,21 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
 | `POST` | `/explain` | 특정 의사결정(`run_id`, `decision_id`, `target_asset`) SHAP 기여도 반환 | `evaluation-xai (8000)` |
 | `POST` | `/research` | 투자 질문에 대한 LangGraph 리서치 요약, 추론 로그, 출처, RiskTag 반환 | `agentic-research (8001)` |
 | `GET` | `/backtest` | Walk-Forward 백테스트 12개 성과 지표 및 ANOVA/Bootstrap 통계 결과 반환 | `evaluation-xai (8000)` |
+| `GET` | `/backtest/{run_id}/timeseries` | (보조) 일별 누적 수익률·낙폭·비중 시계열. 대시보드 차트용 | `evaluation-xai` 산출물 읽기 전용 |
 
 ---
 
-## 🖥️ Streamlit 대시보드 6개 필수 탭 (`8501`)
+## 🖥️ Streamlit 대시보드 (`8501`)
 
-1. **포트폴리오 현황 (`POST /optimize`):** 12종 자산 최적 배분 비중 파이 차트 및 비중 테이블
-2. **강화학습 성과 (`GET /backtest`):** Walk-Forward 구간별(WF2022~WF2025) 12개 성과 지표 비교 표 및 막대 차트
-3. **SHAP 해석 (`POST /explain`):** 피처 그룹별(수익률, 기술적지표, 리스크) SHAP 기여도 시각화
-4. **에이전트 리서치 (`POST /research`):** 투자 의견, 신뢰도, 추론 과정(`trace`), 검증된 출처(`citations`), 리스크 태그(`risk_tags`) 출력
-5. **ANOVA 검증 결과 (`GET /backtest`):** 일원분산분석(F-통계량, p-value, eta-squared) 및 Paired Block Bootstrap 신뢰구간 표시
-6. **리스크 모니터링:** 구간별 MDD, VaR(95%), CVaR(95%) 추적 및 Safe-Guard(MDD 15% 한도) 발동 모니터링
+사이드바 내비게이션, 서비스 상태 표시, 라이트/다크 테마(우측 상단 ⋮ → Settings), 모든 차트에 '표로 보기' 제공.
+
+0. **개요:** 핵심 KPI(누적 수익률·샤프·MDD·VaR, 추세선 포함), 전략별 누적 수익률, 자산군 비중
+1. **포트폴리오 현황 (`POST /optimize`):** 종목별 비중 막대, 자산군 도넛, 전체 테스트 구간 누적 수익률, 비중 변화 영역 차트
+2. **강화학습 성과 (`GET /backtest`):** 지표 선택형 전략×구간 비교 막대, 12개 지표 전체 표, 학습 곡선(rl-engine 결과 연동 예정)
+3. **SHAP 해석 (`POST /explain`):** 기준 비중 → 피처 그룹별 기여 → 예측 비중 폭포 차트, 해석 문장
+4. **에이전트 리서치 (`POST /research`):** 예시 질문, 투자의견 배지·신뢰도, 단계별 추론 과정(Reasoning Trace), 인용 번호가 달린 주장, 원문 링크, 리스크 태그
+5. **ANOVA 검증 결과 (`GET /backtest`):** 과제 3대 검증 상태, 효과 검정(F·p·η²)과 유의성, 가정 진단, 블록 부트스트랩 신뢰구간
+6. **리스크 모니터링:** VaR·CVaR·MDD 게이지, 낙폭(Underwater) 차트와 -15% 한도선, Safe-Guard 발동 기록 및 상태 알림
 
 ---
 
@@ -90,7 +100,7 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
     python -m uvicorn gateway:app --host 127.0.0.1 --port 8080
 
     # 3. Streamlit 대시보드 (8501) 실행
-    python -m streamlit run dashboard.py
+    python -m streamlit run dashboard/app.py
 
 ### B. Docker Compose 일괄 실행 (권장)
 

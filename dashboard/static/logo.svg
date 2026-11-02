@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="40" viewBox="0 0 220 40" role="img" aria-label="Robo-Advisor">
+  <rect x="2" y="4" width="32" height="32" rx="9" fill="#2a78d6"/>
+  <polyline points="9,26 15,19 20,23 27,13" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="27" cy="13" r="2.4" fill="#ffffff"/>
+  <text x="44" y="27" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="19" font-weight="700" fill="#2a78d6">Robo-Advisor</text>
+</svg>
