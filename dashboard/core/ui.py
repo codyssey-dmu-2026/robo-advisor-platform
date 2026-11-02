@@ -34,7 +34,11 @@ METRIC_LABELS = {
     "information_ratio": ("정보비율", "num"),
 }
 
-STRATEGY_LABELS = {"equal_weight": "동일가중", "mvo": "MVO (평균-분산)", "ppo": "PPO 강화학습"}
+STRATEGY_LABELS = {
+    "equal_weight": "동일가중",
+    "mvo": "MVO (평균-분산)",
+    "ppo": "PPO 강화학습",
+}
 
 
 def page_header(title: str, subtitle: str, *, data_mode: str | None = None) -> None:
@@ -45,8 +49,12 @@ def page_header(title: str, subtitle: str, *, data_mode: str | None = None) -> N
     with right:
         with st.container(horizontal=True, horizontal_alignment="right"):
             if data_mode == "synthetic":
-                st.badge("DEMO · 합성 데이터", icon=":material/science:", color="orange",
-                         help="실제 시장 데이터·학습된 PPO 모델 결과가 아닌 평가 파이프라인 검증용 합성 데이터입니다.")
+                st.badge(
+                    "DEMO · 합성 데이터",
+                    icon=":material/science:",
+                    color="orange",
+                    help="실제 시장 데이터·학습된 PPO 모델 결과가 아닌 평가 파이프라인 검증용 합성 데이터입니다.",
+                )
             elif data_mode == "real":
                 st.badge("실데이터", icon=":material/verified:", color="green")
 
@@ -68,7 +76,9 @@ def error_card(error: ApiError) -> None:
             st.caption(error.hint)
 
 
-def empty_state(title: str, body: str, icon: str = ":material/hourglass_empty:") -> None:
+def empty_state(
+    title: str, body: str, icon: str = ":material/hourglass_empty:"
+) -> None:
     with st.container(border=True):
         st.markdown(f"**{icon} {title}**")
         st.caption(body)
@@ -102,10 +112,18 @@ def strategy_label(strategy: str | None) -> str:
     return STRATEGY_LABELS.get(strategy or "", strategy or "-")
 
 
+def run_label(bt: dict, run_id: str) -> str:
+    """백테스트 실행 ID를 '전략 · 구간' 형태로 표시."""
+    run = bt["runs"][run_id]
+    return f"{strategy_label(run.get('strategy'))} · {run.get('fold_id', '-')}"
+
+
 def evaluated_runs(bt: dict) -> list[tuple[str, dict]]:
     """지표가 계산된 백테스트 실행만 (전략, 구간) 순으로."""
     runs = [(k, v) for k, v in bt.get("runs", {}).items() if v.get("metrics")]
-    return sorted(runs, key=lambda kv: (kv[1].get("strategy", ""), kv[1].get("fold_id", "")))
+    return sorted(
+        runs, key=lambda kv: (kv[1].get("strategy", ""), kv[1].get("fold_id", ""))
+    )
 
 
 def footer() -> None:

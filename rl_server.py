@@ -8,24 +8,42 @@ import os
 app = FastAPI(
     title="RL Portfolio Optimization Server",
     version="0.1.0",
-    description="PPO 강화학습 모델 기반 실시간 자산 배분 추론 서버 (Port 8002)"
+    description="PPO 강화학습 모델 기반 실시간 자산 배분 추론 서버 (Port 8002)",
 )
 
 # rl-engine 레포 경로 (기본값: platform과 나란히 있는 형제 폴더, 컨테이너에서는 환경변수로 지정)
-RL_REPO_PATH = Path(os.getenv("RL_REPO_PATH", Path(__file__).resolve().parent.parent / "rl-engine"))
+RL_REPO_PATH = Path(
+    os.getenv("RL_REPO_PATH", Path(__file__).resolve().parent.parent / "rl-engine")
+)
 MODELS_DIR = RL_REPO_PATH / "models"
+
 
 class OptimizeRequest(BaseModel):
     tickers: List[str] = Field(
-        default=["000660", "005930", "069500", "148070", "AAPL", "GLD", "MSFT", "NVDA", "QQQ", "SPY", "TLT", "VNQ"]
+        default=[
+            "000660",
+            "005930",
+            "069500",
+            "148070",
+            "AAPL",
+            "GLD",
+            "MSFT",
+            "NVDA",
+            "QQQ",
+            "SPY",
+            "TLT",
+            "VNQ",
+        ]
     )
     as_of: Optional[str] = Field(default="2024-12-31T00:00:00-05:00")
     risk_override: Optional[bool] = Field(default=True)
+
 
 def find_trained_models() -> List[Path]:
     if not MODELS_DIR.exists():
         return []
     return list(MODELS_DIR.glob("**/*.zip"))
+
 
 @app.get("/health")
 def health_check():
@@ -38,9 +56,12 @@ def health_check():
         "is_mock": True,
         "rl_repo_found": RL_REPO_PATH.exists(),
         "trained_models_count": len(models),
-        "latest_model": models[0].name if models else "ppo_softmax_policy (initialized)",
-        "safeguard_mdd_limit": 0.15
+        "latest_model": (
+            models[0].name if models else "ppo_softmax_policy (initialized)"
+        ),
+        "safeguard_mdd_limit": 0.15,
     }
+
 
 @app.post("/optimize")
 def optimize(req: OptimizeRequest):
@@ -55,10 +76,10 @@ def optimize(req: OptimizeRequest):
     # 시점(as_of) 및 티커 조합에 따라 재현 가능한(Deterministic) PPO 로짓 추론 시뮬레이션
     seed_val = sum(ord(c) for c in (req.as_of or "2024") + "".join(tickers)) % 10000
     rng = np.random.default_rng(seed=seed_val)
-    
+
     # 자산군별 특성 반영 로짓 생성 후 Softmax 변환 (합이 1이 되도록 보장)
     raw_logits = rng.normal(loc=0.0, scale=0.8, size=n)
-    
+
     # 안전자산(TLT, GLD, 148070) 및 대형 기술주 가중치 반영
     for i, t in enumerate(tickers):
         if t in ["SPY", "QQQ", "NVDA", "005930"]:
@@ -84,6 +105,9 @@ def optimize(req: OptimizeRequest):
         "transaction_cost_bps": 1.5,
         "slippage_bps": 5.0,
         "safeguard_triggered": False,
-        "message": f"[시뮬레이션] PPO 정책({model_name}) 연동 전 결정론적 Softmax 비중 (수수료 0.015%, 슬리피지 0.05% 명세값)",
-        "disclaimer": "본 결과는 교육 목적이며 실제 투자 조언에 사용할 수 없습니다. 백테스팅 성과는 미래 수익을 보장하지 않습니다."
+        "message": (
+            f"[시뮬레이션] PPO 정책({model_name}) 연동 전 결정론적 Softmax 비중 "
+            "(수수료 0.015%, 슬리피지 0.05% 명세값)"
+        ),
+        "disclaimer": "본 결과는 교육 목적이며 실제 투자 조언에 사용할 수 없습니다. 백테스팅 성과는 미래 수익을 보장하지 않습니다.",
     }

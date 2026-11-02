@@ -1,0 +1,10 @@
+[tool.black]
+# 팀원 레포(agentic-research, evaluation-xai)와 같은 줄 길이
+line-length = 88
+target-version = ["py312", "py313"]
+extend-exclude = '''
+/(\.venv|\.ai-notes)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -52,7 +52,9 @@
     ├── docker-compose.yml   # 전체 통합 실행 (팀원 레포 커밋 고정 빌드 + bootstrap)
     ├── docker-compose.local.yml  # 개발용: 형제 폴더(../) 코드로 빌드
     ├── .env.example         # 설정·선택 키 템플릿
-    ├── requirements.txt     # 의존성 패키지 목록
+    ├── requirements.txt     # 의존성 패키지 목록 (버전 고정)
+    ├── requirements-dev.txt # 개발용: black, flake8
+    ├── pyproject.toml, .flake8  # 코드 스타일 설정 (한 줄 88자)
     └── README.md
 
 ---
@@ -134,11 +136,18 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 
 ---
 
-## 🧪 유닛 테스트 실행 (`pytest`)
+## 🧪 테스트와 코드 스타일
 
-5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA)을 검증하는 12개의 유닛 테스트를 포함합니다.
+5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 시계열 API,
+Gateway 오프라인 시 대시보드 페이지 렌더링을 검증하는 23개의 테스트를 포함합니다.
 
+    pip install -r requirements-dev.txt   # pytest + black + flake8 (팀원 레포와 같은 버전)
     python -m pytest -v
+
+코드 스타일은 팀 공통 규칙(한 줄 88자)으로 black 포매터와 flake8 린터를 적용합니다. 설정은 `pyproject.toml`, `.flake8`.
+
+    python -m black .        # 형식 자동 정리
+    python -m flake8 .       # 남은 문제 검사 (0건이어야 함)
 
 ---
 

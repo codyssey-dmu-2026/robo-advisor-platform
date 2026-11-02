@@ -15,7 +15,9 @@ RESEARCH_TIMEOUT_S = float(os.getenv("DASHBOARD_RESEARCH_TIMEOUT_S", "8"))
 class ApiError(Exception):
     """Gateway 호출 실패. 화면에는 message와 hint를 그대로 보여준다."""
 
-    def __init__(self, message: str, status: int | None = None, hint: str | None = None):
+    def __init__(
+        self, message: str, status: int | None = None, hint: str | None = None
+    ):
         super().__init__(message)
         self.message = message
         self.status = status
@@ -24,20 +26,30 @@ class ApiError(Exception):
 
 def _request(method: str, path: str, *, timeout: float = TIMEOUT_S, **kwargs) -> Any:
     try:
-        response = requests.request(method, f"{GATEWAY_URL}{path}", timeout=timeout, **kwargs)
+        response = requests.request(
+            method, f"{GATEWAY_URL}{path}", timeout=timeout, **kwargs
+        )
     except requests.exceptions.Timeout:
-        raise ApiError("응답 시간이 초과됐습니다.", hint=f"{timeout:.0f}초 안에 응답이 오지 않았습니다.") from None
+        raise ApiError(
+            "응답 시간이 초과됐습니다.",
+            hint=f"{timeout:.0f}초 안에 응답이 오지 않았습니다.",
+        ) from None
     except requests.exceptions.RequestException:
         raise ApiError(
             "API Gateway에 연결할 수 없습니다.",
-            hint=f"Gateway({GATEWAY_URL})가 실행 중인지 확인하세요. docker compose up 후 잠시 기다려 주세요.",
+            hint=f"Gateway({GATEWAY_URL})가 실행 중인지 확인하세요. "
+            "docker compose up 후 잠시 기다려 주세요.",
         ) from None
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail")
         except ValueError:
             detail = response.text[:200]
-        raise ApiError(f"요청이 실패했습니다 (HTTP {response.status_code}).", status=response.status_code, hint=str(detail))
+        raise ApiError(
+            f"요청이 실패했습니다 (HTTP {response.status_code}).",
+            status=response.status_code,
+            hint=str(detail),
+        )
     return response.json()
 
 
@@ -58,7 +70,11 @@ def timeseries(run_id: str) -> dict:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def explain(run_id: str, decision_id: str, target_asset: str) -> dict:
-    payload = {"run_id": run_id, "decision_id": decision_id, "target_asset": target_asset}
+    payload = {
+        "run_id": run_id,
+        "decision_id": decision_id,
+        "target_asset": target_asset,
+    }
     return _request("POST", "/explain", json=payload)
 
 
