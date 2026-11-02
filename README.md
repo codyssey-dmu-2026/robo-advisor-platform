@@ -1,5 +1,7 @@
 # Robo-Advisor Platform (API Gateway, Web Dashboard & MLOps)
 
+[![Platform checks](https://github.com/codyssey-dmu-2026/robo-advisor-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/codyssey-dmu-2026/robo-advisor-platform/actions/workflows/ci.yml)
+
 에이전틱 RAG + 강화학습 기반 통합 자율 로보어드바이저 프로젝트의 **API 서빙, 웹 대시보드 및 인프라(MLOps)** 파트 레포지토리입니다.
 
 프론트엔드(Streamlit)에서 모델을 직접 로드하지 않는 **MSA(Microservice Architecture) 원칙**을 준수하며, 하위 마이크로서비스(`evaluation-xai`, `agentic-research`, `rl-engine`)를 통합하는 단일 진입점 **API Gateway (`8080`)**와 **6개 필수 탭 기반 대시보드 (`8501`)**를 제공합니다.
@@ -140,6 +142,7 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 
 5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 시계열 API,
 Gateway 오프라인 시 대시보드 페이지 렌더링을 검증하는 23개의 테스트를 포함합니다.
+push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 
     pip install -r requirements-dev.txt   # pytest + black + flake8 (팀원 레포와 같은 버전)
     python -m pytest -v

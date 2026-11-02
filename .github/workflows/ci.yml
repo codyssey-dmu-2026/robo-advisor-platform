@@ -1,0 +1,25 @@
+# platform 레포 자동 검사: push·PR마다 코드 스타일, 테스트, Docker 이미지 빌드를 확인
+name: Platform checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'  # Dockerfile과 같은 버전
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m black --check .
+      - run: python -m flake8 .
+      - run: python -m pytest -v
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t robo-platform:ci .
