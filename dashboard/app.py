@@ -10,6 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from core import api
+from core.print_support import enable_print_layout
 from core.ui import SERVICE_LABELS, footer
 
 st.set_page_config(page_title="Robo-Advisor | 통합 자율 로보어드바이저", page_icon=":material/insights:", layout="wide")
@@ -67,3 +68,4 @@ with st.sidebar:
 
 page.run()
 footer()
+enable_print_layout()
