@@ -194,6 +194,10 @@ services:
       EVAL_API_URL: http://evaluation-xai:8000
       AGENT_API_URL: http://agentic-research:8001
       RL_API_URL: http://rl-engine:8002
+      # 대시보드 차트용 일별 시계열(/backtest/{run_id}/timeseries)을 evaluation-xai 산출물에서 읽음
+      EVAL_ARTIFACT_DIR: /eval-artifacts/demo
+    volumes:
+      - eval-artifacts:/eval-artifacts:ro
     depends_on:
       evaluation-xai:
         condition: service_healthy
@@ -215,7 +219,7 @@ services:
       dockerfile: Dockerfile
     image: robo-platform:local
     container_name: robo-dashboard
-    command: streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
     ports:
       - "8501:8501"
     environment:

@@ -34,6 +34,8 @@ def health_check():
         "status": "ok",
         "service": "rl-engine",
         "version": "0.1.0",
+        # 모델 파일 존재와 별개로, 실제 PPO 추론 연동 전까지는 시뮬레이션 응답임을 명시
+        "is_mock": True,
         "rl_repo_found": RL_REPO_PATH.exists(),
         "trained_models_count": len(models),
         "latest_model": models[0].name if models else "ppo_softmax_policy (initialized)",
