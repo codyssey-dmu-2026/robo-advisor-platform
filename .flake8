@@ -1,0 +1,5 @@
+[flake8]
+# 팀원 레포와 같은 규칙 (black과 충돌하는 E203은 제외)
+max-line-length = 88
+extend-ignore = E203
+exclude = .venv,.git,__pycache__,.pytest_cache,.ai-notes

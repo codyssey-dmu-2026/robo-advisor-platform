@@ -1,5 +1,5 @@
 import time
-import pytest
+
 from fastapi.testclient import TestClient
 
 from gateway import app as gateway_app
@@ -12,6 +12,7 @@ rl_client = TestClient(rl_app)
 # =====================================================================
 # Part 1. RL Serving Server (8002) 고유 기능 유닛 테스트 (5개)
 # =====================================================================
+
 
 def test_01_rl_server_health():
     """1. RL 서빙 서버(/health) 정상 동작 및 필수 메타데이터 반환 검증"""
@@ -26,7 +27,9 @@ def test_01_rl_server_health():
 def test_02_rl_optimize_weights_sum_to_one():
     """2. RL 최적화(/optimize) 결과 자산 비중의 합이 1.0(100%)인지 검증"""
     tickers = ["SPY", "QQQ", "TLT", "GLD", "NVDA", "005930"]
-    res = rl_client.post("/optimize", json={"tickers": tickers, "as_of": "2024-12-31T00:00:00-05:00"})
+    res = rl_client.post(
+        "/optimize", json={"tickers": tickers, "as_of": "2024-12-31T00:00:00-05:00"}
+    )
     assert res.status_code == 200
     weights = res.json()["weights"]
     assert len(weights) == len(tickers)
@@ -35,7 +38,10 @@ def test_02_rl_optimize_weights_sum_to_one():
 
 def test_03_rl_optimize_deterministic_reproducibility():
     """3. 동일 시점(as_of) 및 동일 티커 요청 시 재현 가능한(Deterministic) 동일 비중 반환 검증"""
-    payload = {"tickers": ["AAPL", "MSFT", "NVDA", "GLD"], "as_of": "2024-06-30T00:00:00-05:00"}
+    payload = {
+        "tickers": ["AAPL", "MSFT", "NVDA", "GLD"],
+        "as_of": "2024-06-30T00:00:00-05:00",
+    }
     res1 = rl_client.post("/optimize", json=payload)
     res2 = rl_client.post("/optimize", json=payload)
     assert res1.json()["weights"] == res2.json()["weights"]
@@ -60,6 +66,7 @@ def test_05_rl_optimize_transaction_cost_metadata():
 # =====================================================================
 # Part 2. API Gateway (8080) 5대 엔드포인트 & 규격/SLA 테스트 (7개)
 # =====================================================================
+
 
 def test_06_gateway_openapi_five_endpoints_registered():
     """6. Swagger UI(OpenAPI) 스키마에 5대 필수 엔드포인트가 모두 등록되었는지 검증"""
@@ -87,7 +94,7 @@ def test_08_gateway_optimize_response_and_sla():
     start = time.perf_counter()
     res = gateway_client.post(
         "/optimize",
-        json={"tickers": ["005930", "NVDA", "SPY", "TLT"], "risk_override": True}
+        json={"tickers": ["005930", "NVDA", "SPY", "TLT"], "risk_override": True},
     )
     elapsed = time.perf_counter() - start
     assert res.status_code == 200
@@ -122,7 +129,11 @@ def test_11_gateway_research_validation_and_routing():
     start = time.perf_counter()
     good_res = gateway_client.post(
         "/research",
-        json={"question": "엔비디아 실적 발표", "tickers": ["NVDA"], "as_of": "2024-12-31T00:00:00-05:00"}
+        json={
+            "question": "엔비디아 실적 발표",
+            "tickers": ["NVDA"],
+            "as_of": "2024-12-31T00:00:00-05:00",
+        },
     )
     elapsed = time.perf_counter() - start
     assert elapsed < 5.0
@@ -139,13 +150,16 @@ def test_12_gateway_backtest_routing_and_sla():
     if res.status_code == 200:
         assert "runs" in res.json()
 
+
 # =====================================================================
 # Part 3. 통합 버그 회귀 테스트
 # =====================================================================
 
+
 def test_13_gateway_health_parallel_when_services_offline(monkeypatch):
     """13. 하위 서비스가 모두 응답하지 않아도 /health가 병렬 확인으로 3초 안에 응답하는지 검증"""
     import gateway
+
     # 연결되지 않는 주소(TEST-NET-1)로 바꿔 타임아웃을 유도
     for name in ("EVAL_API_URL", "AGENT_API_URL", "RL_API_URL"):
         monkeypatch.setattr(gateway, name, "http://192.0.2.1:9")
@@ -155,7 +169,9 @@ def test_13_gateway_health_parallel_when_services_offline(monkeypatch):
     elapsed = time.perf_counter() - start
     assert res.status_code == 200
     assert elapsed < 3.0, f"순차 호출 의심: {elapsed:.2f}s"
-    assert all(s["status"] in ("offline", "error") for s in res.json()["services"].values())
+    assert all(
+        s["status"] in ("offline", "error") for s in res.json()["services"].values()
+    )
 
 
 def test_14_rl_mock_response_is_flagged_with_disclaimer():

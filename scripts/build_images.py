@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("services", nargs="*", help="빌드할 서비스 (기본: 전체)")
-    parser.add_argument("--local", action="store_true", help="docker-compose.local.yml 포함")
+    parser.add_argument(
+        "--local", action="store_true", help="docker-compose.local.yml 포함"
+    )
     args = parser.parse_args()
 
     compose = ["docker", "compose", "-f", "docker-compose.yml"]
@@ -42,7 +44,10 @@ def main() -> int:
         return definition.returncode
 
     bake = subprocess.run(
-        ["docker", "buildx", "bake", "-f", "-"], cwd=ROOT, input=definition.stdout, check=False
+        ["docker", "buildx", "bake", "-f", "-"],
+        cwd=ROOT,
+        input=definition.stdout,
+        check=False,
     )
     return bake.returncode
 

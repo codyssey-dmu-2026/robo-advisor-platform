@@ -1,0 +1,4 @@
+# 개발·검사용 도구 (배포 이미지에는 설치하지 않음). 팀원 레포(agentic-research, evaluation-xai)와 같은 버전
+-r requirements.txt
+black==26.5.1
+flake8==7.4.1

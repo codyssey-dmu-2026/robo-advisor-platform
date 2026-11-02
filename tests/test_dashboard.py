@@ -18,8 +18,14 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 import gateway  # noqa: E402
 
 APP = str(Path(__file__).resolve().parent.parent / "dashboard" / "app.py")
-PAGES = ["views/portfolio.py", "views/risk.py", "views/performance.py", "views/shap.py", "views/anova.py",
-         "views/research.py"]
+PAGES = [
+    "views/portfolio.py",
+    "views/risk.py",
+    "views/performance.py",
+    "views/shap.py",
+    "views/anova.py",
+    "views/research.py",
+]
 
 
 @pytest.fixture
@@ -27,12 +33,20 @@ def artifact_dir(tmp_path, monkeypatch):
     dates = pd.date_range("2024-01-01", periods=3, freq="B", name="date")
     run = tmp_path / "mvo_WF2024"
     run.mkdir()
-    pd.DataFrame({
-        "equity_start": [100.0, 101.0, 99.0], "equity_end": [101.0, 99.0, 100.0],
-        "net_return_simple": [0.01, -0.0198, 0.0101], "drawdown": [0.0, 0.0198, 0.0099],
-        "safeguard_triggered": [False, False, False], "guard_active": [False, False, False],
-    }, index=dates).to_parquet(run / "ledger.parquet")
-    pd.DataFrame({"SPY": [0.6, 0.5, 0.5], "CASH": [0.4, 0.5, 0.5]}, index=dates).to_parquet(run / "weights.parquet")
+    pd.DataFrame(
+        {
+            "equity_start": [100.0, 101.0, 99.0],
+            "equity_end": [101.0, 99.0, 100.0],
+            "net_return_simple": [0.01, -0.0198, 0.0101],
+            "drawdown": [0.0, 0.0198, 0.0099],
+            "safeguard_triggered": [False, False, False],
+            "guard_active": [False, False, False],
+        },
+        index=dates,
+    ).to_parquet(run / "ledger.parquet")
+    pd.DataFrame(
+        {"SPY": [0.6, 0.5, 0.5], "CASH": [0.4, 0.5, 0.5]}, index=dates
+    ).to_parquet(run / "weights.parquet")
     monkeypatch.setattr(gateway, "EVAL_ARTIFACT_DIR", tmp_path)
     return tmp_path
 

@@ -11,9 +11,11 @@ import streamlit as st
 _PRINT_CSS = """
 <style>
 @media print {
-  [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="stHeader"],
-  [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stExpander"],
-  [data-testid="stStatusWidget"] { display: none !important; }
+  [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"],
+  [data-testid="stExpander"], [data-testid="stStatusWidget"] {
+    display: none !important;
+  }
   [data-testid="stMain"] { margin-left: 0 !important; }
   [data-testid="stMainBlockContainer"] { padding: 0 !important; }
   /* 세로 flex 배치는 인쇄 쪽 나눔에서 항목만 다음 쪽으로 밀려 카드와 겹치므로 블록 배치로 바꿈 */
@@ -44,7 +46,8 @@ _PRINT_JS = """
       style.id = "robo-print-page";
       document.head.appendChild(style);
     }
-    style.textContent = `@page { size: ${width}px ${height}px; margin: ${MARGIN_PX}px; }`;
+    style.textContent =
+      `@page { size: ${width}px ${height}px; margin: ${MARGIN_PX}px; }`;
   });
 })();
 </script>
