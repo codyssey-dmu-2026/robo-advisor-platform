@@ -1,4 +1,4 @@
-# 대시보드 테마. 라이트/다크 두 벌을 정의하면 우측 상단 메뉴(Settings)에서 전환 가능
+# 대시보드 테마. 라이트/다크 두 벌을 정의하면 우측 상단 ⋮ 메뉴의 System·Light·Dark로 전환
 # 색상은 검증된 데이터 시각화 팔레트(색각 이상 대비 검증 통과)를 사용
 
 [server]
@@ -8,7 +8,8 @@ headless = true
 gatherUsageStats = false
 
 [client]
-toolbarMode = "minimal"
+# viewer: 개발자 메뉴는 숨기고 테마 전환(System·Light·Dark)은 보이게 함. minimal은 메뉴 자체를 숨김
+toolbarMode = "viewer"
 
 [theme]
 font = "Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, -apple-system, 'Segoe UI', sans-serif"

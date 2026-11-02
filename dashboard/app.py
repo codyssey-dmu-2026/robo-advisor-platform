@@ -63,7 +63,7 @@ with st.sidebar:
     st.divider()
     sidebar_status()
     st.divider()
-    st.caption(":material/palette: 우측 상단 ⋮ → Settings에서 라이트/다크 테마를 바꿀 수 있습니다.")
+    st.caption(":material/palette: 테마 변경: 우측 상단 ⋮ 메뉴 맨 위의 System · Light · Dark")
 
 page.run()
 footer()
