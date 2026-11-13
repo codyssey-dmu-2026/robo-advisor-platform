@@ -90,6 +90,8 @@ def optimize(tickers: tuple[str, ...], risk_override: bool, as_of: str | None) -
     return _request("POST", "/optimize", json=payload)
 
 
-def research(question: str, tickers: list[str], as_of: str) -> dict:
+def research(question: str, tickers: list[str], as_of: str | None) -> dict:
+    # 비운 값은 보내지 않아 에이전트가 질문에서 종목을 인식하고 요청 시각을 기준으로 삼게 한다
     payload = {"question": question, "tickers": tickers or None, "as_of": as_of}
+    payload = {k: v for k, v in payload.items() if v is not None}
     return _request("POST", "/research", json=payload, timeout=RESEARCH_TIMEOUT_S)

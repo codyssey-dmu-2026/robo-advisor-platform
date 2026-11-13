@@ -67,14 +67,18 @@
 
 ## 🔌 5대 필수 API 엔드포인트 명세 (Gateway `8080`)
 
-Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
+Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속 (요청·응답 스키마 모두 문서화)
+
+- 요청 형식이 잘못되면 하위 서비스에 보내기 전에 `422`로 거절합니다 (팀원 서비스와 같은 규칙).
+- 하위 서비스가 꺼져 있으면 `503`, 제한 시간(요청 1건 5초 기준) 안에 응답하지 않으면 `504`, 그 밖의 오류는 하위 서비스의 상태 코드와 사유를 그대로 전달합니다.
+- `/optimize`만 예외로, RL 서버 장애 시 `status: mock_fallback`(동일 비중)으로 응답합니다.
 
 | 메서드 | 엔드포인트 | 설명 | 연동 마이크로서비스 |
 |---|---|---|---|
 | `GET` | `/health` | 전체 게이트웨이 및 하위 3개 서비스 상태/모델 로드 여부 반환 | `8000`, `8001`, `8002` |
 | `POST` | `/optimize` | 12개 자산 유니버스 기반 최적 포트폴리오 비중(합=1.0) 반환 | `rl-engine (8002)` |
 | `POST` | `/explain` | 특정 의사결정(`run_id`, `decision_id`, `target_asset`) SHAP 기여도 반환 | `evaluation-xai (8000)` |
-| `POST` | `/research` | 투자 질문에 대한 LangGraph 리서치 요약, 추론 로그, 출처, RiskTag 반환 | `agentic-research (8001)` |
+| `POST` | `/research` | 투자 질문에 대한 LangGraph 리서치 요약, 추론 로그, 출처, RiskTag 반환. `tickers`·`as_of`를 생략하면 에이전트가 질문에서 종목을 인식하고 요청 시각을 기준으로 함 | `agentic-research (8001)` |
 | `GET` | `/backtest` | Walk-Forward 백테스트 12개 성과 지표 및 ANOVA/Bootstrap 통계 결과 반환 | `evaluation-xai (8000)` |
 | `GET` | `/backtest/{run_id}/timeseries` | (보조) 일별 누적 수익률·낙폭·비중 시계열. 대시보드 차트용 | `evaluation-xai` 산출물 읽기 전용 |
 | `GET` | `/performance` | (보조) 현재 RL 모델의 Walk-Forward 실제 성과: 12개 지표, 동일가중·SPY·보상 함수 5종 비교, 4년 연결 시계열, Safe-Guard 한도 초과 구간 | `rl-engine (8002)` |
@@ -157,7 +161,7 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 
 5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 기준일 미래 정보 차단,
 RL 장애 시 대체 응답, 실제 성과 API(4년 연결·시드 평균·벤치마크 지표·Safe-Guard 구간), 시계열 API,
-실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 46개의 테스트를 포함합니다.
+실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 53개의 테스트를 포함합니다. 하위 서비스는 가짜 응답으로 대체해 정상 전달·422·503·504를 각각 확인합니다.
 (CI에는 torch가 없으므로 RL 서버 테스트는 가짜 비중 표를 넣어 API 규칙을 검증합니다.)
 push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 

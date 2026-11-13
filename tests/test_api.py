@@ -1,3 +1,4 @@
+import json
 import time
 
 import httpx
@@ -12,6 +13,8 @@ from gateway import app as gateway_app
 from rl_server import app as rl_app
 
 gateway_client = TestClient(gateway_app)
+# 하위 서비스 대체를 여러 번 해도 진짜 클라이언트를 감싸도록 처음 값을 보관
+REAL_ASYNC_CLIENT = httpx.AsyncClient
 rl_client = TestClient(rl_app)
 
 
@@ -169,7 +172,12 @@ def test_07_gateway_health_aggregation():
 
 def test_08_gateway_optimize_response_and_sla(monkeypatch):
     """8. Gateway POST /optimize가 RL 응답을 그대로 전달하고 5초 이내에 응답하는지 검증"""
-    upstream = {"status": "ok", "weights": {t: 1 / 12 for t in ALL_TICKERS}}
+    upstream = {
+        "status": "ok",
+        "weights": {t: 1 / 12 for t in ALL_TICKERS},
+        "safeguard_triggered": False,
+        "disclaimer": "교육 목적",
+    }
     _rl_upstream(monkeypatch, 200, upstream)
     start = time.perf_counter()
     res = gateway_client.post("/optimize", json={"tickers": ALL_TICKERS})
@@ -186,46 +194,130 @@ def test_09_gateway_explain_validation_error_422():
     assert res.status_code == 422
 
 
-def test_10_gateway_explain_valid_schema():
-    """10. POST /explain 정상 스키마(run_id, decision_id, target_asset) 요청 처리 검증"""
+EXPLAIN = {
+    "data_mode": "synthetic",
+    "run_id": "toy_policy",
+    "decision_id": "toy0",
+    "target_asset": "SYN00",
+    "method": "grouped_interventional_permutation_shap",
+    "groups": ["returns", "indicators", "risk_inputs"],
+    "base_value": 0.1,
+    "predicted_weight": 0.15,
+    "contributions": [0.03, 0.01, 0.01],
+    "extra_field": "그대로 전달되어야 함",
+    "disclaimer": "교육 목적",
+}
+RESEARCH = {
+    "question": "엔비디아 실적과 리스크는?",
+    "as_of": "2025-12-31T21:00:00+00:00",
+    "tickers": ["NVDA"],
+    "answer": "요약",
+    "opinion": "중립",
+    "confidence": 0.6,
+    "claims": [{"text": "주장", "citations": [1]}],
+    "citations": [{"id": 1, "title": "기사", "source_url": "https://example.com"}],
+    "risk_tags": [],
+    "trace": [{"node": "plan", "message": "계획", "data": {}, "elapsed_ms": 3}],
+    "elapsed_ms": 40,
+    "disclaimer": "교육 목적",
+}
+
+
+def test_10_gateway_explain_passes_through_shap(monkeypatch):
+    """10. /explain이 SHAP 결과를 필드 손실 없이 전달하고 하위 서비스 오류 코드를 유지하는지 검증"""
+    _mock_upstream(monkeypatch, 200, EXPLAIN)
     payload = {"run_id": "toy_policy", "decision_id": "toy0", "target_asset": "SYN00"}
     res = gateway_client.post("/explain", json=payload)
-    # 하위 서버(8000) 구동 시 200, 미구동 환경(단독 테스트) 시 503으로 정상 라우팅 검증
-    assert res.status_code in (200, 503)
-    if res.status_code == 200:
-        assert "predicted_weight" in res.json() or "shap_values" in res.json()
+    assert res.status_code == 200
+    assert res.json() == EXPLAIN
+
+    _mock_upstream(monkeypatch, 409, {"detail": "설명이 없는 의사결정입니다"})
+    res = gateway_client.post("/explain", json=payload)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "설명이 없는 의사결정입니다"
+
+    # 경로 조작이 가능한 값은 하위 서비스에 보내기 전에 거절
+    bad = payload | {"run_id": "../etc"}
+    assert gateway_client.post("/explain", json=bad).status_code == 422
 
 
-def test_11_gateway_research_validation_and_routing():
-    """11. POST /research 필수 필드 검증 및 에이전트 리서치 라우팅 검증"""
-    # 질문(question) 타입 오류 시 422 방어 확인
-    bad_res = gateway_client.post("/research", json={"question": ["not_a_string"]})
-    assert bad_res.status_code == 422
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"question": ["not_a_string"]},
+        {"question": "a"},
+        {"question": "질문", "tickers": ["SPY"] * 13},
+        {"question": "질문", "as_of": "2025-12-31T00:00:00"},
+        {"tickers": ["NVDA"]},
+    ],
+)
+def test_11_gateway_research_rejects_invalid_request(monkeypatch, body):
+    """11. /research가 에이전트 규칙에 맞지 않는 요청(질문 길이·종목 수·시간대 없는 시각)을 422로 거절하는지 검증"""
+    _mock_upstream(monkeypatch, 200, RESEARCH)
+    assert gateway_client.post("/research", json=body).status_code == 422
 
-    # 정상 스키마 요청 시 5초 이내 응답 확인
+
+def test_research_does_not_force_ticker_or_date(monkeypatch):
+    """/research가 종목·기준일을 생략하면 기본값을 넣지 않고 에이전트에 맡기는지 검증"""
+    sent = []
+    _mock_upstream(monkeypatch, 200, RESEARCH, sent=sent)
     start = time.perf_counter()
-    good_res = gateway_client.post(
+    res = gateway_client.post("/research", json={"question": "삼성전자 리스크는?"})
+    assert time.perf_counter() - start < 5.0
+    assert res.status_code == 200
+    assert sent == [{"question": "삼성전자 리스크는?"}]
+    assert res.json()["citations"][0]["source_url"] == "https://example.com"
+
+    gateway_client.post(
         "/research",
-        json={
-            "question": "엔비디아 실적 발표",
-            "tickers": ["NVDA"],
-            "as_of": "2024-12-31T00:00:00-05:00",
-        },
+        json={"question": "질문", "as_of": "2025-12-31T16:00:00-05:00"},
     )
-    elapsed = time.perf_counter() - start
-    assert elapsed < 5.0
-    assert good_res.status_code in (200, 503)
+    assert sent[-1]["as_of"] == "2025-12-31T16:00:00-05:00"
 
 
-def test_12_gateway_backtest_routing_and_sla():
-    """12. GET /backtest 백테스트 성과 지표 라우팅 및 5초 이내 응답 검증"""
-    start = time.perf_counter()
+def test_research_timeout_returns_504(monkeypatch):
+    """에이전트가 제한 시간 안에 답하지 않으면 504와 5초 기준 안내를 반환하는지 검증"""
+
+    def slow(request):
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    _mock_upstream(monkeypatch, handler=slow)
+    res = gateway_client.post("/research", json={"question": "삼성전자 리스크는?"})
+    assert res.status_code == 504
+    assert "5초" in res.json()["detail"]
+
+
+def test_12_gateway_backtest_passes_through_and_reports_outage(monkeypatch):
+    """12. /backtest가 지표·ANOVA를 전달하고, 평가 서비스가 꺼져 있으면 503을 반환하는지 검증"""
+    backtest = {"data_mode": "synthetic", "runs": {"r1": {"metrics": {}}}, "x": 1}
+    _mock_upstream(monkeypatch, 200, backtest)
     res = gateway_client.get("/backtest")
-    elapsed = time.perf_counter() - start
-    assert elapsed < 5.0
-    assert res.status_code in (200, 503)
-    if res.status_code == 200:
-        assert "runs" in res.json()
+    assert res.status_code == 200
+    assert res.json() == backtest
+
+    def down(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    _mock_upstream(monkeypatch, handler=down)
+    res = gateway_client.get("/backtest")
+    assert res.status_code == 503
+    assert "Evaluation" in res.json()["detail"]
+
+
+def test_swagger_documents_response_schemas():
+    """5대 엔드포인트의 응답 형식이 Swagger(OpenAPI)에 문서화되어 있는지 검증"""
+    spec = gateway_client.get("/openapi.json").json()
+    for path, method in [
+        ("/health", "get"),
+        ("/optimize", "post"),
+        ("/explain", "post"),
+        ("/research", "post"),
+        ("/backtest", "get"),
+    ]:
+        schema = spec["paths"][path][method]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        assert "$ref" in schema, f"{path} 응답 스키마 없음"
 
 
 # =====================================================================
@@ -259,18 +351,29 @@ def test_14_rl_response_is_real_with_disclaimer(schedule):
     assert "투자 조언" in data["disclaimer"]
 
 
-def _rl_upstream(monkeypatch, status_code, payload):
-    """Gateway가 호출하는 RL 서버 응답을 지정한 값으로 대체한다."""
+def _mock_upstream(
+    monkeypatch, status_code=200, payload=None, *, handler=None, sent=None
+):
+    """Gateway가 호출하는 하위 서비스 응답을 지정한 값으로 대체한다.
 
-    def handler(_):
+    sent: 리스트를 주면 하위 서비스로 보낸 JSON 본문을 기록한다.
+    """
+
+    def respond(request):
+        if sent is not None:
+            sent.append(json.loads(request.content or b"null"))
         return httpx.Response(status_code, json=payload)
 
-    original = httpx.AsyncClient
-
     def client(**kwargs):
-        return original(transport=httpx.MockTransport(handler), **kwargs)
+        transport = httpx.MockTransport(handler or respond)
+        return REAL_ASYNC_CLIENT(transport=transport, **kwargs)
 
     monkeypatch.setattr(gateway.httpx, "AsyncClient", client)
+
+
+def _rl_upstream(monkeypatch, status_code, payload):
+    """RL 서버 응답 대체 (기존 테스트 호환용)."""
+    _mock_upstream(monkeypatch, status_code, payload)
 
 
 def test_gateway_passes_validation_error_from_rl(monkeypatch):
