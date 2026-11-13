@@ -7,6 +7,7 @@
 #
 # 팀원 레포 커밋 고정값 (갱신 시 아래 build.context의 #<sha>를 함께 변경)
 #   agentic-research  bdd5b84 / evaluation-xai 94bca46 / data-pipeline 0bbd15f
+#   rl-engine 05579d2 와 모델 번들(Release models-v1)은 Dockerfile.rl에서 고정
 
 x-health: &health
   interval: 5s
@@ -165,17 +166,23 @@ services:
   rl-engine:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: robo-platform:local
+      dockerfile: Dockerfile.rl
+    image: robo-rl:local
     container_name: robo-rl-server
-    command: uvicorn rl_server:app --host 0.0.0.0 --port 8002
     ports:
       - "8002:8002"
     environment:
-      RL_REPO_PATH: /rl-engine
+      RL_MODEL_NAME: ${RL_MODEL_NAME:-ppo_test_w4_simple_s42}
+      RL_DATA_DIR: /pipeline-data/processed
+    volumes:
+      - pipeline-data:/pipeline-data:ro
+    depends_on:
+      data-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
       <<: *health
+      start_period: 60s
     networks:
       - robo-net
     restart: unless-stopped

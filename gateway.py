@@ -58,9 +58,7 @@ class OptimizeRequest(BaseModel):
         ],
         description="최적화 대상 12개 자산 티커",
     )
-    as_of: Optional[str] = Field(
-        default="2024-12-31T00:00:00-05:00", description="기준 시각"
-    )
+    as_of: Optional[str] = Field(default=None, description="기준 시각. 없으면 최신")
     risk_override: Optional[bool] = Field(default=True, description="RiskTag 연동 여부")
 
 
@@ -112,21 +110,24 @@ async def health_check():
 # 2. POST /optimize : 현재 시장 데이터 기반 최적 포트폴리오 비중 반환
 @app.post("/optimize", summary="2. 강화학습 기반 최적 포트폴리오 비중 추론")
 async def optimize_portfolio(req: OptimizeRequest):
+    r = None
     async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
         try:
-            # 추후 RL 엔진(8002)이 켜지면 자동 연결
             r = await client.post(f"{RL_API_URL}/optimize", json=req.model_dump())
-            if r.status_code == 200:
-                return r.json()
         except Exception:
             pass
+    if r is not None and r.status_code == 200:
+        return r.json()
+    if r is not None and r.status_code == 422:
+        # 잘못된 자산 조합·기준일은 대체 비중으로 가리지 않고 그대로 알린다
+        raise HTTPException(status_code=422, detail=r.json().get("detail"))
 
-    # RL 엔진 연동 전 Fallback 응답 (인터페이스 검증용)
+    # RL 서버 장애 시 동일 비중으로 대체 (status로 구분 가능)
     n = len(req.tickers)
     w = round(1.0 / n, 4) if n > 0 else 0.0
     return {
         "status": "mock_fallback",
-        "message": "RL Engine(8002) 연결 전 기본 비중 반환",
+        "message": "RL Engine(8002)을 사용할 수 없어 동일 비중을 임시 반환",
         "as_of": req.as_of,
         "weights": {t: w for t in req.tickers},
         "safeguard_triggered": False,

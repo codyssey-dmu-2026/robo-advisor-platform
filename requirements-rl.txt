@@ -1,0 +1,13 @@
+# RL 서빙 서버 전용 의존성 (Dockerfile.rl). 모델을 재현한 rl-engine 환경과 같은 버전으로 고정
+# torch는 Dockerfile.rl에서 CPU 전용 빌드로 먼저 설치한다
+fastapi==0.162.0
+uvicorn==0.54.0
+pydantic==2.14.1
+cloudpickle==3.1.2
+gymnasium==0.29.1
+matplotlib==3.11.2
+numpy==2.5.3
+pandas==3.0.6
+pyarrow==25.0.1
+stable_baselines3==2.3.2
+torch==2.14.1

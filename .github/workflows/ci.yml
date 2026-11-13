@@ -23,3 +23,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t robo-platform:ci .
+      - run: docker build -f Dockerfile.rl -t robo-rl:ci .
