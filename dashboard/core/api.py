@@ -79,7 +79,7 @@ def explain(run_id: str, decision_id: str, target_asset: str) -> dict:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def optimize(tickers: tuple[str, ...], risk_override: bool, as_of: str) -> dict:
+def optimize(tickers: tuple[str, ...], risk_override: bool, as_of: str | None) -> dict:
     payload = {"tickers": list(tickers), "risk_override": risk_override, "as_of": as_of}
     return _request("POST", "/optimize", json=payload)
 

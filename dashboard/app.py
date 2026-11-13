@@ -95,9 +95,6 @@ def sidebar_status() -> None:
             f"<span style='opacity:.65;font-size:.8rem'>{desc}</span>",
             unsafe_allow_html=True,
         )
-    rl = services.get("rl_engine", {})
-    if rl.get("status") == "ok" and rl.get("is_mock", True):
-        st.caption(":material/info: 강화학습 모델 연동 전: 비중은 시뮬레이션 값입니다.")
     if st.button("상태 새로고침", icon=":material/refresh:", width="stretch"):
         api.health.clear()
         st.rerun()

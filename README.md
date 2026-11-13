@@ -38,7 +38,7 @@
 
     robo-advisor-platform/
     ├── gateway.py           # 5대 필수 엔드포인트 통합 FastAPI 게이트웨이 (Port 8080)
-    ├── rl_server.py         # PPO 강화학습 모델 추론 및 Softmax 비중 서빙 서버 (Port 8002)
+    ├── rl_server.py         # rl-engine PPO 모델 추론·비중 서빙 서버 (Port 8002)
     ├── dashboard/           # Streamlit 웹 대시보드 (Port 8501)
     │   ├── app.py           # 진입점: 사이드바 내비게이션·시스템 상태·면책 조항
     │   ├── views/           # 개요 + 6개 필수 페이지
@@ -46,11 +46,13 @@
     │   └── static/          # 로고
     ├── .streamlit/config.toml  # 라이트/다크 테마 (색각 이상 대비 검증 팔레트)
     ├── tests/
-    │   ├── test_api.py      # 5대 엔드포인트 규격, 422 방어, 5초 SLA 검증 (14개)
-    │   └── test_dashboard.py  # 시계열 API, Gateway 오프라인 시 페이지 렌더링 검증 (9개)
+    │   ├── test_api.py      # 5대 엔드포인트 규격, RL 서빙 규칙, 422 방어, 5초 SLA 검증
+    │   └── test_dashboard.py  # 시계열 API, Gateway 오프라인 시 페이지 렌더링 검증
     ├── scripts/
     │   └── build_images.py  # Windows용 이미지 빌드 헬퍼 (Compose git URL 빌드 버그 우회)
-    ├── Dockerfile           # API 서빙 및 대시보드 컨테이너 이미지 빌드 명세
+    ├── Dockerfile           # Gateway·대시보드 컨테이너 이미지 빌드 명세
+    ├── Dockerfile.rl        # RL 서빙 전용 이미지 (torch CPU, 모델 번들·rl-engine 코드 고정)
+    ├── requirements-rl.txt  # RL 서빙 의존성 (버전 고정)
     ├── docker-compose.yml   # 전체 통합 실행 (팀원 레포 커밋 고정 빌드 + bootstrap)
     ├── docker-compose.local.yml  # 개발용: 형제 폴더(../) 코드로 빌드
     ├── .env.example         # 설정·선택 키 템플릿
@@ -81,7 +83,7 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
 사이드바 내비게이션, 서비스 상태 표시, 라이트/다크 테마(우측 상단 ⋮ 메뉴의 System·Light·Dark), 모든 차트에 '표로 보기' 제공.
 
 0. **개요:** 핵심 KPI(누적 수익률·샤프·MDD·VaR, 추세선 포함), 전략별 누적 수익률, 자산군 비중
-1. **포트폴리오 현황 (`POST /optimize`):** 종목별 비중 막대, 자산군 도넛, 전체 테스트 구간 누적 수익률, 비중 변화 영역 차트
+1. **포트폴리오 현황 (`POST /optimize`):** 실제 PPO 모델의 기준일별 종목 비중 막대, 자산군 도넛, 전체 테스트 구간 누적 수익률, 비중 변화 영역 차트
 2. **강화학습 성과 (`GET /backtest`):** 지표 선택형 전략×구간 비교 막대, 12개 지표 전체 표, 학습 곡선(rl-engine 결과 연동 예정)
 3. **SHAP 해석 (`POST /explain`):** 기준 비중 → 피처 그룹별 기여 → 예측 비중 폭포 차트, 해석 문장
 4. **에이전트 리서치 (`POST /research`):** 예시 질문, 투자의견 배지·신뢰도, 단계별 추론 과정(Reasoning Trace), 인용 번호가 달린 주장, 원문 링크, 리스크 태그
@@ -129,6 +131,14 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 - 뉴스 데이터는 재배포 금지라 git에 올리지 않고 실행 환경마다 직접 수집합니다.
 - 다시 수집하려면 `.env`에 `BOOTSTRAP_FORCE=1`, 완전 초기화는 `docker compose down -v`.
 
+### RL 서빙 모델
+
+- `rl-engine`에서 학습한 PPO 모델 번들을 Release [`models-v1`](https://github.com/codyssey-dmu-2026/robo-advisor-platform/releases/tag/models-v1)에 두고, `Dockerfile.rl`이 SHA-256 지문을 확인한 뒤 이미지에 넣습니다.
+- 사용할 모델은 `.env`의 `RL_MODEL_NAME`으로 정합니다(기본 `ppo_test_w4_simple_s42`: 2025년 시험 구간, 검증 성적 기준 보상 방식). 값을 바꾸고 `docker compose up -d`만 다시 하면 교체됩니다.
+- 서버는 시작할 때 시험 구간 전체를 모델로 재생해 날짜별 비중을 계산하므로 rl-engine 백테스트와 같은 비중이 나옵니다. `as_of`는 그 시각 **전에 끝난 거래일**의 결정만 사용합니다(미래 정보 누수 방지).
+- 모델이 학습한 12개 자산 전체만 지원하며, 범위 밖 기준일·일부 자산 요청은 422로 거절합니다. 모델을 쓸 수 없으면 RL 서버는 503을, Gateway는 `status: mock_fallback`(동일 비중)을 반환합니다.
+- 로컬 실행 시 `.env.example`의 `RL_REPO_PATH`·`RL_MODELS_DIR`·`RL_DATA_DIR`를 지정하고 `requirements-rl.txt`를 설치합니다.
+
 ### C. 개발 모드 (형제 폴더의 작업 중 코드로 빌드)
 
 상위 폴더에 `data-pipeline`, `evaluation-xai`, `agentic-research`, `rl-engine`, `robo-advisor-platform`이 나란히 있을 때:
@@ -140,8 +150,9 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 
 ## 🧪 테스트와 코드 스타일
 
-5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 시계열 API,
-Gateway 오프라인 시 대시보드 페이지 렌더링을 검증하는 23개의 테스트를 포함합니다.
+5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 기준일 미래 정보 차단,
+RL 장애 시 대체 응답, 시계열 API, Gateway 오프라인 시 대시보드 페이지 렌더링을 검증하는 34개의 테스트를 포함합니다.
+(CI에는 torch가 없으므로 RL 서버 테스트는 가짜 비중 표를 넣어 API 규칙을 검증합니다.)
 push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 
     pip install -r requirements-dev.txt   # pytest + black + flake8 (팀원 레포와 같은 버전)

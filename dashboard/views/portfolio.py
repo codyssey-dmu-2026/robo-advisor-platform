@@ -25,105 +25,109 @@ page_header(
 )
 
 # ---------------- 현재 최적 비중 ----------------
+# 선택 가능한 기준일은 현재 모델의 평가 구간을 RL 서버에서 받아 온다
+try:
+    rl_status = api.health().get("services", {}).get("rl_engine", {})
+except api.ApiError:
+    rl_status = {}
+earliest = date.fromisoformat(rl_status.get("as_of_min", "2025-01-03"))
+latest = date.fromisoformat(rl_status.get("as_of_max", "2026-01-01"))
+
 with st.container(border=True):
     c1, c2, c3 = st.columns([3.6, 1.4, 1.6], vertical_alignment="bottom")
-    tickers = c1.multiselect(
-        "투자 대상 자산",
-        DEFAULT_TICKERS,
-        default=DEFAULT_TICKERS,
-        format_func=asset_name,
-        placeholder="자산을 선택하세요",
+    c1.markdown(
+        f"**투자 대상 자산** · 모델이 학습한 {len(DEFAULT_TICKERS)}개 자산 고정"
     )
     as_of = c2.date_input(
         "기준일",
-        value=date(2024, 12, 31),
-        help="이 날짜까지의 정보로만 판단 (미래 정보 누수 방지)",
+        value=latest,
+        min_value=earliest,
+        max_value=latest,
+        help="이 날짜 전에 끝난 거래일까지의 정보로만 판단 (미래 정보 누수 방지)",
     )
     risk_override = c3.toggle(
         "리스크 태그 반영",
-        value=True,
-        help="에이전트 리서치가 탐지한 위험 이벤트를 비중에 반영",
+        value=False,
+        disabled=True,
+        help="현재 모델은 리스크 태그 없이 학습되어 비중에 반영되지 않습니다",
     )
 
-if not tickers:
-    st.info("자산을 1개 이상 선택하세요.", icon=":material/touch_app:")
-else:
-    as_of_iso = datetime.combine(as_of, time(0), tzinfo=timezone.utc).isoformat()
-    opt = load(
-        api.optimize,
-        tuple(sorted(tickers)),
-        risk_override,
-        as_of_iso,
-        spinner="포트폴리오 최적화 중…",
+as_of_iso = datetime.combine(as_of, time(0), tzinfo=timezone.utc).isoformat()
+opt = load(
+    api.optimize,
+    tuple(DEFAULT_TICKERS),
+    risk_override,
+    as_of_iso,
+    spinner="포트폴리오 최적화 중…",
+)
+if opt:
+    weights = opt.get("weights", {})
+    if opt.get("status") != "ok":
+        st.warning(
+            "RL 서버를 사용할 수 없어 **임시 동일 비중**을 표시합니다. "
+            "실제 모델 결과가 아닙니다.",
+            icon=":material/science:",
+        )
+    ranked = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("편입 자산", f"{len(weights)}개", border=True)
+    k2.metric(
+        "최대 비중",
+        f"{ranked[0][1]:.1%}",
+        help=asset_name(ranked[0][0]),
+        border=True,
     )
-    if opt:
-        weights = opt.get("weights", {})
-        if opt.get("is_mock") or opt.get("status") != "ok":
-            st.warning(
-                "실제 PPO 추론 결과가 아닌 **인터페이스 검증용 시뮬레이션 비중**입니다. "
-                "rl-engine 모델 연동 후 실제 값으로 바뀝니다.",
-                icon=":material/science:",
-            )
-        ranked = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("편입 자산", f"{len(weights)}개", border=True)
-        k2.metric(
-            "최대 비중",
-            f"{ranked[0][1]:.1%}",
-            help=asset_name(ranked[0][0]),
-            border=True,
-        )
-        k3.metric(
-            "거래비용 (편도)",
-            "0.065%",
-            border=True,
-            help="수수료 0.015% + 슬리피지 0.05%, 비중 변화량에 비례해 차감",
-        )
-        k4.metric(
-            "Safe-Guard",
-            "발동" if opt.get("safeguard_triggered") else "정상",
-            border=True,
-            help="MDD 15% 초과 시 위험자산 비중 축소",
-        )
+    k3.metric(
+        "거래비용 (편도)",
+        "0.065%",
+        border=True,
+        help="수수료 0.015% + 슬리피지 0.05%, 비중 변화량에 비례해 차감",
+    )
+    k4.metric(
+        "Safe-Guard",
+        "발동" if opt.get("safeguard_triggered") else "정상",
+        border=True,
+        help="MDD 15% 초과 시 위험자산 비중 축소",
+    )
 
-        left, right = st.columns([3, 2], gap="medium")
-        with left, st.container(border=True):
-            st.markdown("**종목별 비중**")
-            charts.show(
-                charts.hbar([asset_name(t) for t, _ in ranked], [w for _, w in ranked]),
-                key="pf_bar",
-            )
-        with right, st.container(border=True):
-            st.markdown("**자산군 구성**")
-            by_class = defaultdict(float)
-            for t, w in weights.items():
-                by_class[asset_class(t)] += w
-            labels = [c for c in ASSET_CLASSES if c in by_class]
-            charts.show(
-                charts.donut(
-                    labels,
-                    [by_class[c] for c in labels],
-                    colors=charts.color_map(ASSET_CLASSES),
-                    center=f"{len(weights)}개 자산",
-                ),
-                key="pf_donut",
-            )
-        table_view(
-            pd.DataFrame(
-                [
-                    {"자산": asset_name(t), "자산군": asset_class(t), "비중": w}
-                    for t, w in ranked
-                ]
+    left, right = st.columns([3, 2], gap="medium")
+    with left, st.container(border=True):
+        st.markdown("**종목별 비중**")
+        charts.show(
+            charts.hbar([asset_name(t) for t, _ in ranked], [w for _, w in ranked]),
+            key="pf_bar",
+        )
+    with right, st.container(border=True):
+        st.markdown("**자산군 구성**")
+        by_class = defaultdict(float)
+        for t, w in weights.items():
+            by_class[asset_class(t)] += w
+        labels = [c for c in ASSET_CLASSES if c in by_class]
+        charts.show(
+            charts.donut(
+                labels,
+                [by_class[c] for c in labels],
+                colors=charts.color_map(ASSET_CLASSES),
+                center=f"{len(weights)}개 자산",
             ),
-            column_config={
-                "비중": st.column_config.ProgressColumn(
-                    format="percent", min_value=0, max_value=1
-                )
-            },
+            key="pf_donut",
         )
-        st.caption(
-            f"모델: `{opt.get('model_used', '-')}` · 기준 시각 {opt.get('as_of', '-')}"
-        )
+    table_view(
+        pd.DataFrame(
+            [
+                {"자산": asset_name(t), "자산군": asset_class(t), "비중": w}
+                for t, w in ranked
+            ]
+        ),
+        column_config={
+            "비중": st.column_config.ProgressColumn(
+                format="percent", min_value=0, max_value=1
+            )
+        },
+    )
+    st.caption(
+        f"모델: `{opt.get('model_used', '-')}` · 기준 시각 {opt.get('as_of', '-')}"
+    )
 
 # ---------------- 백테스트 성과 추이 ----------------
 st.markdown("#### 성과 추이 (Walk-Forward 백테스트)")

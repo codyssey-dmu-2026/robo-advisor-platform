@@ -112,9 +112,7 @@ if bt:
 
     with right, st.container(border=True):
         st.markdown("**현재 추천 비중 · 자산군**")
-        opt = load(
-            api.optimize, tuple(DEFAULT_TICKERS), True, "2024-12-31T00:00:00-05:00"
-        )
+        opt = load(api.optimize, tuple(DEFAULT_TICKERS), False, None)
         if opt:
             by_class = defaultdict(float)
             for ticker, w in opt.get("weights", {}).items():
@@ -130,10 +128,8 @@ if bt:
                 ),
                 key="home_donut",
             )
-            if opt.get("is_mock") or opt.get("status") != "ok":
-                st.caption(
-                    ":material/info: 강화학습 모델 연동 전 시뮬레이션 비중입니다."
-                )
+            if opt.get("status") != "ok":
+                st.caption(":material/info: RL 서버 장애로 동일 비중을 표시 중입니다.")
 
 st.markdown("#### 바로가기")
 cols = st.columns(3)
