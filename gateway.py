@@ -59,7 +59,10 @@ class OptimizeRequest(BaseModel):
         description="최적화 대상 12개 자산 티커",
     )
     as_of: Optional[str] = Field(default=None, description="기준 시각. 없으면 최신")
-    risk_override: Optional[bool] = Field(default=True, description="RiskTag 연동 여부")
+    risk_override: Optional[bool] = Field(
+        default=True,
+        description="리스크 태그 Safe-Guard 적용 여부 (위험 신호가 강한 자산 비중 축소)",
+    )
 
 
 class ExplainRequest(BaseModel):
@@ -123,7 +126,12 @@ class OptimizeResponse(PassThrough):
     status: str = Field(
         description="ok: 실제 모델 / mock_fallback: RL 장애 시 동일 비중"
     )
-    weights: Dict[str, float] = Field(description="자산별 비중 (합 1.0)")
+    weights: Dict[str, float] = Field(
+        description="자산별 최종 비중 (합 1.0, 리스크 태그 Safe-Guard 적용 후)"
+    )
+    model_weights: Optional[Dict[str, float]] = Field(
+        default=None, description="Safe-Guard 적용 전 모델 원래 비중"
+    )
     as_of: Optional[str] = None
     decision_date: Optional[str] = Field(
         default=None, description="비중을 결정한 거래일 (장 마감 후)"
@@ -131,8 +139,28 @@ class OptimizeResponse(PassThrough):
     model_used: Optional[str] = None
     is_mock: Optional[bool] = None
     safeguard_triggered: bool
-    risk_override_applied: Optional[bool] = None
+    risk_override_applied: Optional[bool] = Field(
+        default=None, description="리스크 태그로 비중이 실제로 조정됐는지"
+    )
+    risk_guard: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Safe-Guard 규칙, 근거 태그(tags), 자산별 조정 내역(adjustments)",
+    )
     message: Optional[str] = None
+    disclaimer: str
+
+
+class RiskTagsResponse(PassThrough):
+    model_name: str
+    rule: Dict[str, Any] = Field(description="위험 점수 정의, 기준값, 최대 축소 비율")
+    tag_count: int
+    period: Dict[str, str] = Field(description="현재 모델의 평가 구간")
+    trading_days: int
+    adjusted_days: int = Field(description="Safe-Guard가 비중을 조정한 거래일 수")
+    days: List[Dict[str, Any]] = Field(description="발동일별 줄어든 비중과 대상 자산")
+    by_asset: List[Dict[str, Any]]
+    tags: List[Dict[str, Any]] = Field(description="구간 안에서 유효했던 리스크 태그")
+    limitation: str
     disclaimer: str
 
 
@@ -311,6 +339,22 @@ async def rl_performance():
     return await _forward(
         "GET",
         f"{RL_API_URL}/performance",
+        "RL Engine(8002)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
+
+
+@app.get(
+    "/risk-tags",
+    summary="(보조) 리스크 태그 Safe-Guard 발동 내역",
+    response_model=RiskTagsResponse,
+    response_model_exclude_unset=True,
+)
+async def risk_tag_guard():
+    """에이전트의 리스크 태그가 현재 모델 비중을 언제, 얼마나 줄였는지 요약."""
+    return await _forward(
+        "GET",
+        f"{RL_API_URL}/risk-tags",
         "RL Engine(8002)",
         timeout=UPSTREAM_TIMEOUT_S,
     )

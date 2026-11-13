@@ -239,6 +239,7 @@ def hbar(
     *,
     height: int | None = None,
     percent: bool = True,
+    digits: int = 2,
 ):
     """정렬된 가로 막대 (단일 계열이라 한 가지 색). 값은 막대 끝 바깥에 표시."""
     p = palette()
@@ -248,14 +249,14 @@ def hbar(
             y=labels,
             orientation="h",
             marker=dict(color=p.series[0], cornerradius=4),
-            text=[f"{v:.1%}" if percent else f"{v:,.2f}" for v in values],
+            text=[f"{v:.1%}" if percent else f"{v:,.{digits}f}" for v in values],
             textposition="outside",
             textfont=dict(color=p.ink),
             cliponaxis=False,
             hovertemplate=(
                 "%{y}: %{x:.2%}<extra></extra>"
                 if percent
-                else "%{y}: %{x:,.3f}<extra></extra>"
+                else f"%{{y}}: %{{x:,.{digits + 1 if digits else 0}f}}<extra></extra>"
             ),
         )
     )
@@ -263,6 +264,25 @@ def hbar(
     fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
     fig.update_xaxes(showticklabels=False, showgrid=False)
     fig.update_layout(bargap=0.35, margin=dict(r=48), showlegend=False)
+    return fig
+
+
+def date_bars(x: list, values: list[float], *, name: str, height: int = 260):
+    """날짜별 세로 막대 (단일 계열이라 한 가지 색). 값이 있는 날만 막대가 선다."""
+    p = palette()
+    fig = go.Figure(
+        go.Bar(
+            x=x,
+            y=values,
+            name=name,
+            marker=dict(color=p.series[0], cornerradius=4),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>{name} %{{y:.1%}}<extra></extra>",
+        )
+    )
+    style(fig, height=height, percent_y=True, hover="closest")
+    fig.update_xaxes(type="date")
+    fig.update_yaxes(rangemode="tozero")
+    fig.update_layout(showlegend=False, bargap=0.2)
     return fig
 
 

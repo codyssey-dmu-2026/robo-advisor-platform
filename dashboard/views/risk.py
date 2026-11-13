@@ -1,15 +1,20 @@
-"""리스크 모니터링: VaR/CVaR 게이지, MDD 추이, Safe-Guard 알림 (현재 모델의 실제 백테스트)."""
+"""리스크 모니터링: VaR/CVaR 게이지, MDD 추이, Safe-Guard 알림 (현재 모델의 실제 백테스트).
+
+아래쪽에는 리스크 태그 Safe-Guard(위험 이벤트 → 비중 축소)의 발동 현황을 보여 준다.
+"""
 
 import pandas as pd
 import streamlit as st
 
 from core import api, charts
+from core.assets import asset_name
 from core.ui import (
     empty_state,
     load,
     page_header,
     pct,
     perf_entries,
+    risk_tag_table,
     table_view,
     window_label,
 )
@@ -19,7 +24,7 @@ VAR_LIMIT = 0.03  # 일간 VaR 주의 기준 (모니터링용 표시 기준)
 perf = load(api.performance)
 page_header(
     "리스크 모니터링",
-    "손실 위험 지표와 Safe-Guard(MDD 15% 한도) 발동 현황",
+    "손실 위험 지표, MDD Safe-Guard(15% 한도), 리스크 태그 Safe-Guard 발동 현황",
     data_mode=perf.get("data_mode") if perf else None,
 )
 
@@ -136,3 +141,124 @@ if perf:
                 "낙폭이 한도 안에 머물렀습니다.",
                 icon=":material/check_circle:",
             )
+
+# ---------------- 리스크 태그 Safe-Guard ----------------
+st.markdown("#### 리스크 태그 Safe-Guard")
+guard = load(api.risk_tags)
+if guard:
+    rule, days = guard["rule"], guard["days"]
+    st.caption(
+        "리서치 에이전트가 탐지한 위험 이벤트(급등락·실적 쇼크 등)를 리스크 태그로 받아, "
+        f"위험 점수(심각도 × 신뢰도)가 {rule['threshold']:.2f} 이상인 자산의 비중을 "
+        f"(점수 × {rule['max_cut']:.0%})만큼 자동으로 줄입니다. "
+        f"대상 기간은 현재 모델의 평가 구간 {guard['period']['start']} ~ "
+        f"{guard['period']['end']}입니다."
+    )
+    applied_tags = sum(1 for t in guard["tags"] if t["applied"])
+    peak = max(days, key=lambda d: d["moved_weight"]) if days else None
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        "발동일",
+        f"{guard['adjusted_days']}일",
+        f"전체 {guard['trading_days']}거래일",
+        delta_color="off",
+        delta_arrow="off",
+        border=True,
+        help="위험 신호 때문에 비중을 실제로 조정한 거래일 수",
+    )
+    m2.metric(
+        "발동일 평균 축소 비중",
+        f"{guard['average_moved'] * 100:.1f}%p",
+        border=True,
+        height="stretch",
+        help="발동한 날 위험 자산에서 덜어 낸 비중 합계의 평균",
+    )
+    m3.metric(
+        "최대 축소 비중",
+        f"{guard['max_moved'] * 100:.1f}%p",
+        peak["date"] if peak else None,
+        delta_color="off",
+        delta_arrow="off",
+        border=True,
+    )
+    m4.metric(
+        "반영된 태그",
+        f"{applied_tags}건",
+        f"기간 내 유효 {len(guard['tags'])}건",
+        delta_color="off",
+        delta_arrow="off",
+        border=True,
+        help="기준 점수 이상이라 비중 축소에 쓰인 태그 수",
+    )
+
+    if days:
+        left, right = st.columns([3, 2], gap="medium")
+        with left, st.container(border=True):
+            st.markdown("**발동일별 축소 비중**")
+            st.caption("막대가 있는 날이 Safe-Guard가 비중을 조정한 결정일입니다.")
+            charts.show(
+                charts.date_bars(
+                    [d["date"] for d in days],
+                    [d["moved_weight"] for d in days],
+                    name="축소 비중",
+                ),
+                key="guard_days",
+            )
+            table_view(
+                pd.DataFrame(
+                    [
+                        {
+                            "결정일": d["date"],
+                            "축소 비중": d["moved_weight"],
+                            "대상 자산": ", ".join(asset_name(a) for a in d["assets"]),
+                        }
+                        for d in sorted(days, key=lambda d: -d["moved_weight"])
+                    ]
+                ),
+                label="표로 보기 (축소 비중 큰 순)",
+                column_config={
+                    "축소 비중": st.column_config.NumberColumn(format="percent")
+                },
+            )
+        with right, st.container(border=True):
+            st.markdown("**자산별 발동일 수**")
+            st.caption("위험 신호로 비중이 줄어든 날이 많은 자산 순")
+            assets = guard["by_asset"]
+            charts.show(
+                charts.hbar(
+                    [asset_name(a["asset"]) for a in assets],
+                    [a["days"] for a in assets],
+                    percent=False,
+                    digits=0,
+                ),
+                key="guard_assets",
+            )
+            table_view(
+                pd.DataFrame(
+                    [
+                        {
+                            "자산": asset_name(a["asset"]),
+                            "발동일 수": a["days"],
+                            "하루 평균 축소": a["moved_weight"],
+                        }
+                        for a in assets
+                    ]
+                ),
+                column_config={
+                    "하루 평균 축소": st.column_config.NumberColumn(format="percent")
+                },
+            )
+    else:
+        empty_state(
+            "이 구간에는 Safe-Guard가 발동한 날이 없습니다.",
+            "기준 점수 이상인 위험 이벤트가 없었습니다.",
+            icon=":material/check_circle:",
+        )
+
+    if guard["tags"]:
+        with st.expander(
+            f"기간 내 리스크 태그 {len(guard['tags'])}건 (출처 포함)",
+            icon=":material/crisis_alert:",
+        ):
+            risk_tag_table(guard["tags"])
+    st.caption(f":material/info: {guard['limitation']}")

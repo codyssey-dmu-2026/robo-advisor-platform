@@ -99,7 +99,7 @@ if perf:
 
 with right, st.container(border=True):
     st.markdown("**현재 추천 비중 · 자산군**")
-    opt = load(api.optimize, tuple(DEFAULT_TICKERS), False, None)
+    opt = load(api.optimize, tuple(DEFAULT_TICKERS), True, None)
     if opt:
         by_class = defaultdict(float)
         for ticker, w in opt.get("weights", {}).items():
@@ -118,7 +118,11 @@ with right, st.container(border=True):
         if opt.get("status") != "ok":
             st.caption(":material/info: RL 서버 장애로 동일 비중을 표시 중입니다.")
         elif opt.get("decision_date"):
-            st.caption(f"{opt['decision_date']} 장 마감 후 결정")
+            note = f"{opt['decision_date']} 장 마감 후 결정"
+            if opt.get("risk_override_applied"):
+                cut = len(opt["risk_guard"]["adjustments"])
+                note += f" · 리스크 태그 Safe-Guard가 {cut}개 자산 비중 축소"
+            st.caption(note)
 
 st.markdown("#### 바로가기")
 cols = st.columns(3)
@@ -133,7 +137,7 @@ links = [
         "views/risk.py",
         "리스크 모니터링",
         ":material/shield:",
-        "VaR·CVaR 게이지, 낙폭, Safe-Guard",
+        "VaR·CVaR 게이지, 낙폭, Safe-Guard 발동 현황",
     ),
     (
         "views/research.py",
