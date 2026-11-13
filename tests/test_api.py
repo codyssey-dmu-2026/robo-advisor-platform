@@ -167,18 +167,17 @@ def test_07_gateway_health_aggregation():
     assert "rl_engine" in data["services"]
 
 
-def test_08_gateway_optimize_response_and_sla():
-    """8. Gateway POST /optimize 정상 응답 및 5초 이내 응답(SLA) 준수 검증"""
+def test_08_gateway_optimize_response_and_sla(monkeypatch):
+    """8. Gateway POST /optimize가 RL 응답을 그대로 전달하고 5초 이내에 응답하는지 검증"""
+    upstream = {"status": "ok", "weights": {t: 1 / 12 for t in ALL_TICKERS}}
+    _rl_upstream(monkeypatch, 200, upstream)
     start = time.perf_counter()
-    res = gateway_client.post(
-        "/optimize",
-        json={"tickers": ["005930", "NVDA", "SPY", "TLT"], "risk_override": True},
-    )
+    res = gateway_client.post("/optimize", json={"tickers": ALL_TICKERS})
     elapsed = time.perf_counter() - start
     assert res.status_code == 200
     assert elapsed < 5.0, f"응답 시간 5초 초과: {elapsed:.2f}s"
-    weights = res.json()["weights"]
-    assert abs(sum(weights.values()) - 1.0) < 1e-2
+    assert res.json() == upstream
+    assert abs(sum(res.json()["weights"].values()) - 1.0) < 1e-6
 
 
 def test_09_gateway_explain_validation_error_422():

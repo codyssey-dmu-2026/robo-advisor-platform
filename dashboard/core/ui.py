@@ -38,7 +38,49 @@ STRATEGY_LABELS = {
     "equal_weight": "동일가중",
     "mvo": "MVO (평균-분산)",
     "ppo": "PPO 강화학습",
+    # rl-engine 실제 백테스트 전략 이름
+    "EqualWeight": "동일가중",
+    "SPY": "S&P500 (SPY)",
+    "PPO-simple": "PPO · 단순 수익률",
+    "PPO-sharpe": "PPO · 샤프",
+    "PPO-mdd_l0.5": "PPO · MDD 페널티 λ0.5",
+    "PPO-mdd_l1.0": "PPO · MDD 페널티 λ1.0",
+    "PPO-mdd_l5.0": "PPO · MDD 페널티 λ5.0",
 }
+
+
+def perf_label(entry: dict) -> str:
+    """성과 비교용 이름. 현재 모델은 시드를, 다른 보상 함수는 시드 평균임을 표시."""
+    name = strategy_label(entry["strategy"])
+    if entry["kind"] == "model":
+        return f"{name} (현재 모델)"
+    if entry["kind"] == "variant":
+        return f"{name} (시드 평균)"
+    return name
+
+
+def perf_entries(perf: dict) -> dict[str, dict]:
+    """현재 모델(model)·동일가중(baseline)·벤치마크(benchmark) 항목."""
+    return {e["kind"]: e for e in perf["strategies"] if e["kind"] != "variant"}
+
+
+def comparison_series(perf: dict, field: str) -> dict[str, tuple[list, list]]:
+    """현재 모델·동일가중·벤치마크의 4년 연결 시계열 (field: cumulative_return/drawdown)."""
+    entries = perf_entries(perf)
+    keys = {"model": "model", "equal_weight": "baseline", "benchmark": "benchmark"}
+    series = perf["series"]
+    return {
+        perf_label(entries[kind]): (series["dates"], series[key][field])
+        for key, kind in keys.items()
+    }
+
+
+def window_label(perf: dict, window: int) -> str:
+    """Walk-Forward 구간 번호를 테스트 연도로 표시."""
+    for w in perf.get("windows", []):
+        if w["window"] == window:
+            return f"{w['start'][:4]}년"
+    return f"구간 {window}"
 
 
 def page_header(title: str, subtitle: str, *, data_mode: str | None = None) -> None:

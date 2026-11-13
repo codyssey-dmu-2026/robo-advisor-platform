@@ -135,6 +135,25 @@ async def optimize_portfolio(req: OptimizeRequest):
     }
 
 
+@app.get("/performance", summary="(보조) 현재 RL 모델의 Walk-Forward 백테스트 성과")
+async def rl_performance():
+    """대시보드 성과·리스크 화면용. 동일가중·SPY·다른 보상 함수와의 비교 포함."""
+    async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
+        try:
+            r = await client.get(f"{RL_API_URL}/performance")
+        except Exception as e:
+            raise HTTPException(
+                status_code=503, detail=f"RL Engine(8002) 연결 실패: {e}"
+            ) from e
+    if r.status_code != 200:
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = r.text[:200]
+        raise HTTPException(status_code=r.status_code, detail=detail)
+    return r.json()
+
+
 # 3. POST /explain : 특정 의사결정에 대한 SHAP 해석 반환
 @app.post("/explain", summary="3. 특정 의사결정에 대한 SHAP 해석 반환")
 async def explain_decision(req: ExplainRequest):

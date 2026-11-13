@@ -1,4 +1,4 @@
-"""포트폴리오 현황: 현재 자산 비중(POST /optimize)과 누적 수익률·비중 변화(백테스트 시계열)."""
+"""포트폴리오 현황: 현재 자산 비중(POST /optimize)과 누적 수익률·비중 변화(GET /performance)."""
 
 from collections import defaultdict
 from datetime import date, datetime, time, timezone
@@ -8,20 +8,13 @@ import streamlit as st
 
 from core import api, charts
 from core.assets import ASSET_CLASSES, DEFAULT_TICKERS, asset_class, asset_name
-from core.ui import (
-    evaluated_runs,
-    load,
-    page_header,
-    run_label,
-    strategy_label,
-    table_view,
-)
+from core.ui import comparison_series, empty_state, load, page_header, table_view
 
-bt = load(api.backtest)
+perf = load(api.performance)
 page_header(
     "포트폴리오 현황",
     "강화학습 엔진이 제안하는 현재 자산 비중과 과거 성과 추이",
-    data_mode=bt.get("data_mode") if bt else None,
+    data_mode=perf.get("data_mode") if perf else None,
 )
 
 # ---------------- 현재 최적 비중 ----------------
@@ -70,25 +63,44 @@ if opt:
         )
     ranked = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("편입 자산", f"{len(weights)}개", border=True)
+    k1.metric("편입 자산", f"{len(weights)}개", border=True, height="stretch")
     k2.metric(
         "최대 비중",
         f"{ranked[0][1]:.1%}",
         help=asset_name(ranked[0][0]),
         border=True,
+        height="stretch",
     )
     k3.metric(
         "거래비용 (편도)",
         "0.065%",
         border=True,
+        height="stretch",
         help="수수료 0.015% + 슬리피지 0.05%, 비중 변화량에 비례해 차감",
     )
-    k4.metric(
-        "Safe-Guard",
-        "발동" if opt.get("safeguard_triggered") else "정상",
-        border=True,
-        help="MDD 15% 초과 시 위험자산 비중 축소",
-    )
+    # 기준일(결정일) 당시 4년 연속 운용 기준 낙폭으로 Safe-Guard 한도 초과 여부 판정
+    drawdown = None
+    if perf and opt.get("decision_date"):
+        series = perf["series"]
+        past = [
+            dd
+            for d, dd in zip(series["dates"], series["model"]["drawdown"])
+            if d <= opt["decision_date"]
+        ]
+        drawdown = past[-1] if past else None
+    if drawdown is None:
+        k4.metric("Safe-Guard", "—", border=True, help="낙폭 정보를 불러오지 못함")
+    else:
+        over = drawdown > perf["mdd_limit"]
+        k4.metric(
+            "Safe-Guard",
+            "한도 초과" if over else "정상",
+            f"낙폭 {-drawdown:.1%}",
+            delta_color="inverse" if over else "off",
+            delta_arrow="off",
+            border=True,
+            help="결정일 기준 고점 대비 낙폭. 15%를 넘으면 한도 초과",
+        )
 
     left, right = st.columns([3, 2], gap="medium")
     with left, st.container(border=True):
@@ -131,79 +143,49 @@ if opt:
 
 # ---------------- 백테스트 성과 추이 ----------------
 st.markdown("#### 성과 추이 (Walk-Forward 백테스트)")
-if bt:
-    runs = evaluated_runs(bt)
-    strategies = sorted({r["strategy"] for _, r in runs})
-    colors = {strategy_label(s): c for s, c in charts.color_map(strategies).items()}
-
+if perf:
     with st.container(border=True):
         st.markdown("**누적 수익률 · 전체 테스트 구간 연결**")
         st.caption(
-            "구간마다 재학습한 결과를 이어 붙인 out-of-sample 성과 (각 구간 시작 시 자본 연속)"
+            "구간(1년)마다 그 이전 데이터로만 재학습한 모델의 out-of-sample 성과를 "
+            "이어 붙임 · 거래비용 차감 후 · 벤치마크는 S&P500 추종 ETF(SPY)"
         )
-        series, rows = {}, []
-        for s in strategies:
-            dates, values, growth = [], [], 1.0
-            for run_id, r in runs:
-                if r["strategy"] != s:
-                    continue
-                ts = load(api.timeseries, run_id)
-                if not ts:
-                    continue
-                prev = growth
-                for d, cr in zip(ts["dates"], ts["cumulative_return"]):
-                    dates.append(d)
-                    values.append(prev * (1 + cr) - 1)
-                growth = prev * (1 + ts["cumulative_return"][-1])
-            if dates:
-                series[strategy_label(s)] = (dates, values)
-                rows.append(
+        lines = comparison_series(perf, "cumulative_return")
+        colors = charts.color_map(list(lines))
+        charts.show(charts.line(lines, colors=colors, height=360), key="pf_cum")
+        dates = perf["series"]["dates"]
+        table_view(
+            pd.DataFrame(
+                [
                     {
-                        "전략": strategy_label(s),
+                        "전략": name,
                         "기간": f"{dates[0]} ~ {dates[-1]}",
-                        "누적 수익률": values[-1],
+                        "누적 수익률": y[-1],
                     }
-                )
-        if series:
-            charts.show(charts.line(series, colors=colors, height=360), key="pf_cum")
-            table_view(
-                pd.DataFrame(rows),
-                column_config={
-                    "누적 수익률": st.column_config.NumberColumn(format="percent")
-                },
-            )
-        st.caption(
-            ":material/info: 벤치마크(S&P500·KOSPI) 비교는 실데이터 평가 결과 연동 후 표시됩니다."
+                    for name, (_, y) in lines.items()
+                ]
+            ),
+            column_config={
+                "누적 수익률": st.column_config.NumberColumn(format="percent")
+            },
         )
 
     with st.container(border=True):
-        c1, c2 = st.columns([3, 2], vertical_alignment="bottom")
-        c1.markdown("**비중 변화**")
-        run_ids = [k for k, _ in runs]
-        sel = c2.selectbox(
-            "백테스트 실행",
-            run_ids,
-            index=len(run_ids) - 1 if run_ids else 0,
-            format_func=lambda k: run_label(bt, k),
-            label_visibility="collapsed",
-        )
-        ts = load(api.timeseries, sel) if sel else None
-        if ts and ts["weights"]:
-            # 종목이 많으면 색이 8개를 넘으므로 자산군으로 묶고, 자산군 정보가 없으면 상위 5개 + 기타
-            frame = pd.DataFrame(ts["weights"], index=ts["dates"]).fillna(0)
-            classes = {c: asset_class(c) for c in frame.columns}
-            if set(classes.values()) <= set(ASSET_CLASSES) | {"현금"}:
-                grouped = frame.T.groupby(classes).sum().T
-            else:
-                top = (
-                    frame.drop(columns=["CASH"], errors="ignore")
-                    .mean()
-                    .nlargest(5)
-                    .index.tolist()
-                )
-                grouped = frame[top].copy()
-                grouped["기타·현금"] = frame.drop(columns=top).sum(axis=1)
-            order = list(grouped.columns)
+        st.markdown("**비중 변화 · 현재 모델의 테스트 구간**")
+        weights = perf.get("weights")
+        if weights:
+            frame = pd.DataFrame(
+                weights["values"], index=weights["dates"], columns=weights["tickers"]
+            )
+            # 12개 종목은 색이 너무 많아 자산군 5개로 묶어 표시
+            grouped = (
+                frame.T.groupby({t: asset_class(t) for t in frame.columns}).sum().T
+            )
+            order = [c for c in ASSET_CLASSES if c in grouped.columns]
+            st.caption(
+                f"{weights['dates'][0]} ~ {weights['dates'][-1]} 매 거래일 장 마감 후 "
+                "모델이 정한 목표 비중 (자산군 합계)"
+            )
             charts.show(
                 charts.stacked_area(
                     list(grouped.index),
@@ -213,9 +195,15 @@ if bt:
                 key="pf_area",
             )
             table_view(
-                grouped.reset_index(names="날짜").tail(20),
+                grouped[order].reset_index(names="날짜").tail(20),
                 label="표로 보기 (최근 20일)",
                 column_config={
                     c: st.column_config.NumberColumn(format="percent") for c in order
                 },
+            )
+        else:
+            empty_state(
+                "RL 서버에서 모델 비중을 불러오지 못했습니다.",
+                "모델이 로드되면 날짜별 비중 변화가 표시됩니다.",
+                icon=":material/cloud_off:",
             )
