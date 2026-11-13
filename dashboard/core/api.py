@@ -63,6 +63,12 @@ def backtest() -> dict:
     return _request("GET", "/backtest")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def performance() -> dict:
+    """현재 RL 모델의 Walk-Forward 성과 (rl-engine 실제 백테스트 결과)."""
+    return _request("GET", "/performance")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def timeseries(run_id: str) -> dict:
     return _request("GET", f"/backtest/{run_id}/timeseries")

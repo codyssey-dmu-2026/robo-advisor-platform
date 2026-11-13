@@ -1,4 +1,4 @@
-"""개요: 핵심 지표와 현재 포트폴리오를 한 화면에."""
+"""개요: 현재 모델의 핵심 성과와 추천 비중을 한 화면에."""
 
 from collections import defaultdict
 
@@ -8,128 +8,117 @@ import streamlit as st
 from core import api, charts
 from core.assets import ASSET_CLASSES, DEFAULT_TICKERS, asset_class
 from core.ui import (
-    evaluated_runs,
+    comparison_series,
     load,
-    metric_value,
+    num,
     page_header,
     pct,
-    num,
-    strategy_label,
+    perf_entries,
     table_view,
 )
 
-bt = load(api.backtest)
+perf = load(api.performance)
 page_header(
     "포트폴리오 개요",
     "강화학습 자산배분 · 에이전트 리서치 · 설명 가능성(XAI)을 한눈에",
-    data_mode=bt.get("data_mode") if bt else None,
+    data_mode=perf.get("data_mode") if perf else None,
 )
 
-if bt:
-    runs = evaluated_runs(bt)
-    strategies = sorted({r["strategy"] for _, r in runs})
-    folds = sorted({r["fold_id"] for _, r in runs})
-    latest = folds[-1] if folds else None
 
-    c1, c2 = st.columns([3, 2], vertical_alignment="bottom")
-    strategy = c1.segmented_control(
-        "전략",
-        strategies,
-        default=strategies[0] if strategies else None,
-        format_func=strategy_label,
-        required=True,
+def delta(value: float | None, base: float | None, *, percent: bool) -> str | None:
+    """동일가중 대비 차이 문구 (비교할 수 없으면 표시하지 않음)."""
+    if value is None or base is None:
+        return None
+    diff = value - base
+    return f"{diff * 100:+.1f}%p" if percent else f"{diff:+.2f}"
+
+
+if perf:
+    entries = perf_entries(perf)
+    model, base = entries["model"]["total"], entries["baseline"]["total"]
+    series = perf["series"]
+    period = f"{perf['windows'][0]['start']} ~ {perf['windows'][-1]['end']}"
+    st.caption(
+        f"현재 모델 `{perf['model_name']}` · Walk-Forward 테스트 {period} "
+        "(구간마다 재학습, 거래비용 차감 후) · 아래 작은 숫자는 동일가중 대비 차이"
     )
-    c2.caption(f"기준 구간: **{latest}** (Walk-Forward 테스트 1년)")
 
-    run_id, run = next(
-        (
-            (k, r)
-            for k, r in runs
-            if r["strategy"] == strategy and r["fold_id"] == latest
-        ),
-        (None, None),
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        "누적 수익률 (4년)",
+        pct(model["cumulative_return"], 1),
+        delta(model["cumulative_return"], base["cumulative_return"], percent=True),
+        border=True,
+        chart_data=series["model"]["cumulative_return"][::5],
+        chart_type="area",
+        help="테스트 구간 4년을 이어 붙인 out-of-sample 누적 수익률",
     )
-    if run:
-        ts = load(api.timeseries, run_id)
-        spark = ts["cumulative_return"][::5] if ts else None
-        dd = [-d for d in ts["drawdown"][::5]] if ts else None
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric(
-            "누적 수익률",
-            pct(metric_value(run, "cumulative_return"), 2),
-            border=True,
-            chart_data=spark,
-            chart_type="area",
-            help="테스트 구간 시작 대비 누적 수익률",
-        )
-        k2.metric(
-            "샤프 비율",
-            num(metric_value(run, "sharpe")),
-            border=True,
-            height="stretch",
-            help="변동성 1단위당 초과수익. 높을수록 위험 대비 성과가 좋음",
-        )
-        k3.metric(
-            "최대 낙폭 (MDD)",
-            pct(-(metric_value(run, "mdd") or 0), 2),
-            border=True,
-            chart_data=dd,
-            chart_type="area",
-            help="고점 대비 최대 하락폭. Safe-Guard 한도는 -15%",
-        )
-        k4.metric(
-            "VaR 95% (일간)",
-            pct(-(metric_value(run, "var_95") or 0), 2),
-            border=True,
-            height="stretch",
-            help="하루 동안 95% 확률로 이보다 크게 잃지 않는 손실 한도",
-        )
+    k2.metric(
+        "샤프 비율",
+        num(model["sharpe"]),
+        delta(model["sharpe"], base["sharpe"], percent=False),
+        border=True,
+        height="stretch",
+        help="변동성 1단위당 수익. 높을수록 위험 대비 성과가 좋음",
+    )
+    k3.metric(
+        "최대 낙폭 (MDD)",
+        pct(-(model["mdd"] or 0), 1),
+        delta(model["mdd"], base["mdd"], percent=True),
+        delta_color="inverse",
+        border=True,
+        chart_data=[-d for d in series["model"]["drawdown"][::5]],
+        chart_type="area",
+        help="고점 대비 최대 하락폭. Safe-Guard 한도는 -15%",
+    )
+    k4.metric(
+        "VaR 95% (일간)",
+        pct(-(model["var_95"] or 0), 2),
+        delta(model["var_95"], base["var_95"], percent=True),
+        delta_color="inverse",
+        border=True,
+        height="stretch",
+        help="하루 동안 95% 확률로 이보다 크게 잃지 않는 손실 한도",
+    )
 
-    left, right = st.columns([3, 2], gap="medium")
+left, right = st.columns([3, 2], gap="medium")
+if perf:
     with left, st.container(border=True):
-        st.markdown(f"**누적 수익률 비교 · {latest}**")
-        palette_map = charts.color_map(strategies)
-        series, rows = {}, []
-        for k, r in runs:
-            if r["fold_id"] != latest:
-                continue
-            data = load(api.timeseries, k)
-            if data:
-                name = strategy_label(r["strategy"])
-                series[name] = (data["dates"], data["cumulative_return"])
-                rows.append(
-                    {"전략": name, "누적 수익률": data["cumulative_return"][-1]}
-                )
-        if series:
-            colors = {strategy_label(s): palette_map[s] for s in strategies}
-            charts.show(charts.line(series, colors=colors, height=320), key="home_line")
-            table_view(
-                pd.DataFrame(rows),
-                column_config={
-                    "누적 수익률": st.column_config.NumberColumn(format="percent")
-                },
-            )
+        st.markdown("**누적 수익률 비교 · 4년 연결**")
+        lines = comparison_series(perf, "cumulative_return")
+        colors = charts.color_map(list(lines))
+        charts.show(charts.line(lines, colors=colors, height=320), key="home_line")
+        table_view(
+            pd.DataFrame(
+                [{"전략": name, "누적 수익률": y[-1]} for name, (_, y) in lines.items()]
+            ),
+            column_config={
+                "누적 수익률": st.column_config.NumberColumn(format="percent")
+            },
+        )
 
-    with right, st.container(border=True):
-        st.markdown("**현재 추천 비중 · 자산군**")
-        opt = load(api.optimize, tuple(DEFAULT_TICKERS), False, None)
-        if opt:
-            by_class = defaultdict(float)
-            for ticker, w in opt.get("weights", {}).items():
-                by_class[asset_class(ticker)] += w
-            labels = [c for c in ASSET_CLASSES if c in by_class]
-            charts.show(
-                charts.donut(
-                    labels,
-                    [by_class[c] for c in labels],
-                    colors=charts.color_map(ASSET_CLASSES),
-                    center="12개 자산",
-                    height=290,
-                ),
-                key="home_donut",
-            )
-            if opt.get("status") != "ok":
-                st.caption(":material/info: RL 서버 장애로 동일 비중을 표시 중입니다.")
+with right, st.container(border=True):
+    st.markdown("**현재 추천 비중 · 자산군**")
+    opt = load(api.optimize, tuple(DEFAULT_TICKERS), False, None)
+    if opt:
+        by_class = defaultdict(float)
+        for ticker, w in opt.get("weights", {}).items():
+            by_class[asset_class(ticker)] += w
+        labels = [c for c in ASSET_CLASSES if c in by_class]
+        charts.show(
+            charts.donut(
+                labels,
+                [by_class[c] for c in labels],
+                colors=charts.color_map(ASSET_CLASSES),
+                center="12개 자산",
+                height=290,
+            ),
+            key="home_donut",
+        )
+        if opt.get("status") != "ok":
+            st.caption(":material/info: RL 서버 장애로 동일 비중을 표시 중입니다.")
+        elif opt.get("decision_date"):
+            st.caption(f"{opt['decision_date']} 장 마감 후 결정")
 
 st.markdown("#### 바로가기")
 cols = st.columns(3)

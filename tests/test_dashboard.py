@@ -67,6 +67,91 @@ def test_16_timeseries_unknown_and_invalid_run(artifact_dir):
     assert client.get("/backtest/bad.id/timeseries").status_code == 422
 
 
+class _Response:
+    def __init__(self, payload: dict):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+@pytest.fixture
+def online_gateway(perf_results, monkeypatch):
+    """Gateway 응답을 실제 형식의 성과 데이터로 대체 (RL 성과 화면 렌더링 검증용)."""
+    import requests
+    import streamlit as st
+
+    import rl_server
+
+    monkeypatch.setattr(
+        rl_server, "get_schedule", lambda: (_ for _ in ()).throw(RuntimeError())
+    )
+    perf = rl_server.get_performance() | {"weights": None}
+    tickers = [
+        "000660",
+        "005930",
+        "069500",
+        "148070",
+        "AAPL",
+        "GLD",
+        "MSFT",
+        "NVDA",
+        "QQQ",
+        "SPY",
+        "TLT",
+        "VNQ",
+    ]
+    responses = {
+        "/performance": perf,
+        "/health": {
+            "gateway": "ok",
+            "services": {
+                "rl_engine": {
+                    "status": "ok",
+                    "as_of_min": "2025-01-03",
+                    "as_of_max": "2025-01-07",
+                }
+            },
+        },
+        "/optimize": {
+            "status": "ok",
+            "weights": {t: 1 / len(tickers) for t in tickers},
+            "decision_date": "2025-01-06",
+            "model_used": "fake",
+        },
+    }
+
+    def fake_request(method, url, **kwargs):
+        path = url.removeprefix(os.environ["GATEWAY_URL"])
+        if path not in responses:
+            raise requests.exceptions.ConnectionError(path)
+        return _Response(responses[path])
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    st.cache_data.clear()
+    yield
+    st.cache_data.clear()
+
+
+@pytest.mark.parametrize(
+    "page", [None, "views/portfolio.py", "views/risk.py", "views/performance.py"]
+)
+def test_18_dashboard_renders_real_performance(online_gateway, page):
+    """18. 실제 성과 데이터로 개요·포트폴리오·리스크·강화학습 성과 화면이 예외 없이 그려지는지 검증"""
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    if page:
+        at.switch_page(page)
+        at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    texts = [m.value for m in at.markdown]
+    # st.badge는 markdown으로 그려진다. 실데이터 표시가 있고 API 오류 카드는 없어야 함
+    assert any("실데이터" in t for t in texts)
+    failures = ("연결할 수 없습니다", "요청이 실패했습니다", "응답 시간이 초과")
+    assert not any(f in t for t in texts for f in failures), "API 오류 카드가 표시됨"
+
+
 @pytest.mark.parametrize("page", [None, *PAGES])
 def test_17_dashboard_pages_render_when_gateway_offline(page):
     """17. Gateway 오프라인에서도 각 페이지가 예외 없이 렌더링되고 사이드바에 오프라인 안내가 뜨는지 검증"""

@@ -47,7 +47,9 @@
     ├── .streamlit/config.toml  # 라이트/다크 테마 (색각 이상 대비 검증 팔레트)
     ├── tests/
     │   ├── test_api.py      # 5대 엔드포인트 규격, RL 서빙 규칙, 422 방어, 5초 SLA 검증
-    │   └── test_dashboard.py  # 시계열 API, Gateway 오프라인 시 페이지 렌더링 검증
+    │   ├── test_performance.py  # 실제 백테스트 성과 API 검증
+    │   ├── test_dashboard.py  # 시계열 API, 실데이터·오프라인 페이지 렌더링 검증
+    │   └── conftest.py      # 테스트용 백테스트 결과 CSV 준비
     ├── scripts/
     │   └── build_images.py  # Windows용 이미지 빌드 헬퍼 (Compose git URL 빌드 버그 우회)
     ├── Dockerfile           # Gateway·대시보드 컨테이너 이미지 빌드 명세
@@ -75,6 +77,7 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
 | `POST` | `/research` | 투자 질문에 대한 LangGraph 리서치 요약, 추론 로그, 출처, RiskTag 반환 | `agentic-research (8001)` |
 | `GET` | `/backtest` | Walk-Forward 백테스트 12개 성과 지표 및 ANOVA/Bootstrap 통계 결과 반환 | `evaluation-xai (8000)` |
 | `GET` | `/backtest/{run_id}/timeseries` | (보조) 일별 누적 수익률·낙폭·비중 시계열. 대시보드 차트용 | `evaluation-xai` 산출물 읽기 전용 |
+| `GET` | `/performance` | (보조) 현재 RL 모델의 Walk-Forward 실제 성과: 12개 지표, 동일가중·SPY·보상 함수 5종 비교, 4년 연결 시계열, Safe-Guard 한도 초과 구간 | `rl-engine (8002)` |
 
 ---
 
@@ -82,13 +85,15 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속
 
 사이드바 내비게이션, 서비스 상태 표시, 라이트/다크 테마(우측 상단 ⋮ 메뉴의 System·Light·Dark), 모든 차트에 '표로 보기' 제공.
 
-0. **개요:** 핵심 KPI(누적 수익률·샤프·MDD·VaR, 추세선 포함), 전략별 누적 수익률, 자산군 비중
-1. **포트폴리오 현황 (`POST /optimize`):** 실제 PPO 모델의 기준일별 종목 비중 막대, 자산군 도넛, 전체 테스트 구간 누적 수익률, 비중 변화 영역 차트
-2. **강화학습 성과 (`GET /backtest`):** 지표 선택형 전략×구간 비교 막대, 12개 지표 전체 표, 학습 곡선(rl-engine 결과 연동 예정)
+0. **개요:** 현재 모델의 4년 KPI(누적 수익률·샤프·MDD·VaR, 동일가중 대비 차이), 현재 모델·동일가중·SPY 누적 수익률, 자산군 비중
+1. **포트폴리오 현황 (`POST /optimize`, `GET /performance`):** 실제 PPO 모델의 기준일별 종목 비중, 자산군 도넛, 기준일 낙폭 기반 Safe-Guard 상태, 4년 연결 누적 수익률, 비중 변화
+2. **강화학습 성과 (`GET /performance`):** 과제 성능 기준 점검(SPY·동일가중 대비 샤프 +0.2, 누적 +10%p), 보상 함수 5종·벤치마크 연도별 비교, 12개 지표 전체 표, 학습 곡선(rl-engine 학습 기록 공유 대기)
 3. **SHAP 해석 (`POST /explain`):** 기준 비중 → 피처 그룹별 기여 → 예측 비중 폭포 차트, 해석 문장
 4. **에이전트 리서치 (`POST /research`):** 예시 질문, 투자의견 배지·신뢰도, 단계별 추론 과정(Reasoning Trace), 인용 번호가 달린 주장, 원문 링크, 리스크 태그
 5. **ANOVA 검증 결과 (`GET /backtest`):** 과제 3대 검증 상태, 효과 검정(F·p·η²)과 유의성, 가정 진단, 블록 부트스트랩 신뢰구간
-6. **리스크 모니터링:** VaR·CVaR·MDD 게이지, 낙폭(Underwater) 차트와 -15% 한도선, Safe-Guard 발동 기록 및 상태 알림
+6. **리스크 모니터링 (`GET /performance`):** 4년 전체·연도별 VaR·CVaR·MDD 게이지, 낙폭(Underwater) 차트와 -15% 한도선, Safe-Guard 한도 초과 구간 기록 및 상태 알림
+
+SHAP·ANOVA 페이지는 evaluation-xai 결과를 사용하며, 실데이터 평가 전까지 `DEMO` 배지로 표시됩니다.
 
 ---
 
@@ -151,7 +156,8 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 ## 🧪 테스트와 코드 스타일
 
 5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 기준일 미래 정보 차단,
-RL 장애 시 대체 응답, 시계열 API, Gateway 오프라인 시 대시보드 페이지 렌더링을 검증하는 34개의 테스트를 포함합니다.
+RL 장애 시 대체 응답, 실제 성과 API(4년 연결·시드 평균·벤치마크 지표·Safe-Guard 구간), 시계열 API,
+실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 46개의 테스트를 포함합니다.
 (CI에는 torch가 없으므로 RL 서버 테스트는 가짜 비중 표를 넣어 API 규칙을 검증합니다.)
 push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 
