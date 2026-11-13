@@ -22,6 +22,56 @@ BENCHMARK = [0.01, -0.02, 0.03, 0.00, -0.05, 0.04]
 METRICS = list(rl_server.METRIC_COLUMNS)
 
 
+@pytest.fixture(autouse=True)
+def no_risk_tags(tmp_path, monkeypatch):
+    """개발 PC에 있는 실제 리스크 태그 파일이 결과를 바꾸지 않게 기본은 '태그 없음'으로 둔다."""
+    monkeypatch.setattr(rl_server, "RISK_TAGS_PATH", tmp_path / "none" / "tags.jsonl")
+    rl_server.get_risk_tags.cache_clear()
+    yield
+    rl_server.get_risk_tags.cache_clear()
+
+
+def risk_tag(
+    asset: str,
+    severity: float,
+    available_at: str,
+    *,
+    days: int = 5,
+    confidence: float = 1.0,
+    risk_type: str = "price_shock",
+) -> dict:
+    """agentic-research RiskTag와 같은 형식의 태그 1건 (위험 점수 = 심각도 × 신뢰도)."""
+    available = pd.Timestamp(available_at)
+    return {
+        "tag_id": f"rt_{asset}_{available:%Y%m%d}_{risk_type}",
+        "asset_id": asset,
+        "risk_type": risk_type,
+        "severity": severity,
+        "confidence": confidence,
+        "published_at": available.isoformat(),
+        "available_at": available.isoformat(),
+        "generated_at": "2026-10-30T11:39:13.126191Z",
+        "expires_at": (available + pd.Timedelta(days=days)).isoformat(),
+        "source_url": f"https://example.com/{asset}",
+        "tagger_version": "test",
+        "mode": "historical_replay",
+    }
+
+
+@pytest.fixture
+def write_tags(tmp_path, monkeypatch):
+    """리스크 태그 파일을 만들고 서버가 그 파일을 읽게 한다."""
+
+    def write(*tags: dict):
+        path = tmp_path / "risk_tags.jsonl"
+        path.write_text("".join(json.dumps(t) + "\n" for t in tags), encoding="utf-8")
+        monkeypatch.setattr(rl_server, "RISK_TAGS_PATH", path)
+        rl_server.get_risk_tags.cache_clear()
+        return path
+
+    return write
+
+
 def _metrics(value: float) -> dict:
     """지표 값은 계산 검증 대상이 아니므로 전략마다 다른 상수로 채운다."""
     return {col: value for col in METRICS}

@@ -4,6 +4,10 @@
 요청이 오면 그 표에서 찾아 돌려준다. rl-engine의 환경 코드를 그대로 쓰므로
 백테스트(eval_test_daily.csv)와 같은 비중이 나온다.
 모델·데이터는 환경 변수로 지정하므로 RL_MODEL_NAME만 바꾸면 모델을 교체할 수 있다.
+
+리스크 태그 Safe-Guard: agentic-research가 만든 위험 이벤트(RiskTag)를 읽어, 위험 신호가
+강한 자산의 비중을 줄인 뒤 응답한다 (과제의 "리스크 모니터링 모듈 연동"). 모델을 다시
+학습하지 않는 서빙 단계 규칙이므로 /performance의 백테스트 수치에는 반영되지 않는다.
 """
 
 import json
@@ -35,6 +39,17 @@ RL_DATA_DIR = Path(
 )
 # rl-engine Walk-Forward 백테스트 결과 CSV 폴더 (eval_test_*.csv, 모델 번들에 포함)
 RL_RESULTS_DIR = Path(os.getenv("RL_RESULTS_DIR", RL_MODELS_DIR))
+# agentic-research가 만든 리스크 태그 파일 (읽기 전용)
+RISK_TAGS_PATH = Path(
+    os.getenv(
+        "RISK_TAGS_PATH",
+        _SIBLINGS / "agentic-research" / "artifacts" / "risk_tags.jsonl",
+    )
+)
+# 위험 점수(심각도 × 신뢰도)가 이 값 이상인 자산만 비중을 줄인다
+RISK_TAG_THRESHOLD = float(os.getenv("RISK_TAG_THRESHOLD", "0.5"))
+# 축소 비율 = RISK_TAG_MAX_CUT × 위험 점수 (점수 1.0이면 비중의 절반을 줄임)
+RISK_TAG_MAX_CUT = float(os.getenv("RISK_TAG_MAX_CUT", "0.5"))
 
 TRADING_DAYS = 252
 MDD_LIMIT = 0.15  # Safe-Guard 한도
@@ -70,6 +85,7 @@ class PolicySchedule:
     tickers: List[str]
     dates: pd.DatetimeIndex
     weights: np.ndarray
+    max_weight: float = 0.4  # 자산당 비중 상한 (모델 학습 설정)
 
     @property
     def as_of_min(self) -> pd.Timestamp:
@@ -141,6 +157,7 @@ def _build_schedule() -> PolicySchedule:
         tickers=list(data.tickers),
         dates=pd.DatetimeIndex(dates).tz_localize(None),
         weights=np.asarray(weights, dtype=float),
+        max_weight=float(meta["max_weight"]),
     )
 
 
@@ -148,6 +165,202 @@ def _build_schedule() -> PolicySchedule:
 def get_schedule() -> PolicySchedule:
     """최초 1회만 계산한다. 실패하면 저장하지 않으므로 다음 호출에서 다시 시도한다."""
     return _build_schedule()
+
+
+# ---------------- 리스크 태그 Safe-Guard ----------------
+TAG_COLUMNS = [
+    "tag_id",
+    "asset_id",
+    "risk_type",
+    "severity",
+    "confidence",
+    "available_at",
+    "expires_at",
+    "source_url",
+]
+
+
+@lru_cache(maxsize=1)
+def get_risk_tags() -> pd.DataFrame:
+    """리스크 태그 표. 파일이 없으면 예외가 나고 저장되지 않아 다음 호출에서 다시 읽는다."""
+    with RISK_TAGS_PATH.open(encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    frame = pd.DataFrame(rows, columns=TAG_COLUMNS)
+    for column in ("available_at", "expires_at"):
+        # 한국·미국 시간대가 섞여 있으므로 UTC로 통일해 비교한다
+        frame[column] = pd.to_datetime(frame[column], utc=True, format="ISO8601")
+    # 에이전트의 RiskTagProvider.vector()와 같은 정의: 심각도 × 신뢰도
+    frame["score"] = frame["severity"].astype(float) * frame["confidence"].astype(float)
+    return frame
+
+
+def _active_tags(
+    tags: pd.DataFrame, decision_date: pd.Timestamp, tickers: List[str]
+) -> pd.DataFrame:
+    """결정일 장 마감까지 공개됐고 아직 만료되지 않은 태그 (미래 정보 누수 방지)."""
+    # 결정일이 끝나는 시각(다음 날 0시 UTC). 한국·미국 장 마감이 모두 이 시각 이전이다
+    at = (decision_date + ONE_DAY).tz_localize("UTC")
+    live = tags[
+        (tags["available_at"] <= at)
+        & (at < tags["expires_at"])
+        & tags["asset_id"].isin(tickers)
+    ]
+    return live.sort_values(["score", "tag_id"], ascending=[False, True])
+
+
+def _spread(
+    weights: np.ndarray, amount: float, receivers: np.ndarray, max_weight: float
+) -> tuple[np.ndarray, float]:
+    """amount를 receivers에게 현재 비중 비율대로 나눠 주되 자산당 상한을 넘기지 않는다."""
+    weights, receivers = weights.copy(), receivers.copy()
+    while amount > 1e-12:
+        receivers &= weights < max_weight - 1e-12
+        if not receivers.any():
+            break
+        base = weights[receivers]
+        share = (
+            base / base.sum() if base.sum() > 0 else np.full(base.size, 1 / base.size)
+        )
+        give = np.minimum(amount * share, max_weight - base)
+        weights[receivers] += give
+        amount -= float(give.sum())
+    return weights, amount
+
+
+def apply_risk_tags(
+    weights: np.ndarray, scores: np.ndarray, max_weight: float
+) -> np.ndarray:
+    """위험 점수가 기준 이상인 자산의 비중을 줄이고, 줄인 만큼을 나머지 자산에 나눈다.
+
+    축소 비율은 RISK_TAG_MAX_CUT × 점수. 줄인 비중은 위험 신호가 없는 자산이 원래 비율대로
+    받고, 그 자산들이 상한에 걸려 다 받지 못할 때만 남은 만큼을 전체 자산에 돌려준다.
+    """
+    weights = np.asarray(weights, dtype=float)
+    cut = np.where(scores >= RISK_TAG_THRESHOLD, RISK_TAG_MAX_CUT * scores, 0.0)
+    adjusted = weights * (1.0 - cut)
+    freed = float(weights.sum() - adjusted.sum())
+    for receivers in (cut == 0, np.ones(len(weights), dtype=bool)):
+        adjusted, freed = _spread(adjusted, freed, receivers, max_weight)
+    return adjusted
+
+
+def _tag_records(live: pd.DataFrame) -> List[dict]:
+    return [
+        {
+            "tag_id": row.tag_id,
+            "asset_id": row.asset_id,
+            "risk_type": row.risk_type,
+            "severity": _clean(row.severity),
+            "confidence": _clean(row.confidence),
+            "score": round(float(row.score), 4),
+            "available_at": row.available_at.isoformat(),
+            "expires_at": row.expires_at.isoformat(),
+            "source_url": row.source_url,
+            "applied": bool(row.score >= RISK_TAG_THRESHOLD),
+        }
+        for row in live.itertuples()
+    ]
+
+
+def guard_decision(schedule: PolicySchedule, index: int, tags: pd.DataFrame) -> dict:
+    """index번째 결정일의 Safe-Guard 결과: 조정된 비중, 근거 태그, 자산별 조정 내역."""
+    raw = schedule.weights[index]
+    live = _active_tags(tags, schedule.dates[index], schedule.tickers)
+    best = live.groupby("asset_id")["score"].max()
+    scores = np.array([float(best.get(t, 0.0)) for t in schedule.tickers])
+    adjusted = apply_risk_tags(raw, scores, schedule.max_weight)
+    adjustments = [
+        {
+            "asset": ticker,
+            "score": round(float(scores[i]), 4),
+            "before": round(float(raw[i]), 6),
+            "after": round(float(adjusted[i]), 6),
+        }
+        for i, ticker in enumerate(schedule.tickers)
+        if scores[i] >= RISK_TAG_THRESHOLD
+    ]
+    return {
+        "weights": adjusted,
+        "tags": _tag_records(live),
+        "adjustments": sorted(adjustments, key=lambda a: a["after"] - a["before"]),
+        # 위험 자산에서 실제로 빠져나간 비중 합계
+        "moved_weight": round(sum(a["before"] - a["after"] for a in adjustments), 6),
+    }
+
+
+def _guard_rule(schedule: PolicySchedule) -> dict:
+    return {
+        "score": "유효한 태그 중 최대 (심각도 × 신뢰도)",
+        "threshold": RISK_TAG_THRESHOLD,
+        "max_cut": RISK_TAG_MAX_CUT,
+        "max_weight": schedule.max_weight,
+    }
+
+
+def build_guard_summary(schedule: PolicySchedule, tags: pd.DataFrame) -> dict:
+    """현재 모델의 평가 구간 전체에서 Safe-Guard가 언제, 얼마나 작동했는지 요약."""
+    days, seen, by_asset = [], {}, {}
+    for index, date in enumerate(schedule.dates):
+        result = guard_decision(schedule, index, tags)
+        for tag in result["tags"]:
+            seen[tag["tag_id"]] = tag
+        if not result["adjustments"]:
+            continue
+        days.append(
+            {
+                "date": str(date.date()),
+                # 이 결정이 적용되는 /optimize 기준일
+                "as_of": str((date + ONE_DAY).date()),
+                "moved_weight": result["moved_weight"],
+                "assets": [a["asset"] for a in result["adjustments"]],
+            }
+        )
+        for item in result["adjustments"]:
+            entry = by_asset.setdefault(
+                item["asset"], {"asset": item["asset"], "days": 0, "moved_weight": 0.0}
+            )
+            entry["days"] += 1
+            entry["moved_weight"] += item["before"] - item["after"]
+    moved = [d["moved_weight"] for d in days]
+    for entry in by_asset.values():
+        # 발동일 하루 평균으로 줄어든 비중
+        entry["moved_weight"] = round(entry["moved_weight"] / entry["days"], 6)
+    return {
+        "status": "ok",
+        "model_name": schedule.model_name,
+        "rule": _guard_rule(schedule),
+        "tag_count": int(len(tags)),
+        "period": {
+            "start": str(schedule.dates[0].date()),
+            "end": str(schedule.dates[-1].date()),
+        },
+        "trading_days": len(schedule.dates),
+        "adjusted_days": len(days),
+        "average_moved": round(float(np.mean(moved)), 6) if moved else 0.0,
+        "max_moved": round(float(np.max(moved)), 6) if moved else 0.0,
+        "days": days,
+        "by_asset": sorted(by_asset.values(), key=lambda e: -e["days"]),
+        "tags": sorted(seen.values(), key=lambda t: t["available_at"]),
+        "limitation": (
+            "서빙 단계에서 적용하는 규칙입니다. 모델은 리스크 태그 없이 학습됐고, "
+            "백테스트 성과에는 이 조정이 반영되지 않았습니다."
+        ),
+        "disclaimer": DISCLAIMER,
+    }
+
+
+_GUARD_SUMMARY: list = []  # [(비중표, 태그 표, 요약)] 마지막 계산 1건
+
+
+def get_guard_summary(schedule: PolicySchedule, tags: pd.DataFrame) -> dict:
+    """같은 비중표·태그로는 한 번만 계산한다 (전체 구간 계산에 0.5초가량 걸림)."""
+    if _GUARD_SUMMARY:
+        cached_schedule, cached_tags, summary = _GUARD_SUMMARY[0]
+        if cached_schedule is schedule and cached_tags is tags:
+            return summary
+    summary = build_guard_summary(schedule, tags)
+    _GUARD_SUMMARY[:] = [(schedule, tags, summary)]
+    return summary
 
 
 def _clean(value) -> Optional[float]:
@@ -368,6 +581,10 @@ async def lifespan(_: FastAPI):
         logger.info("모델 로드 완료: %s", schedule.model_name)
     except Exception:
         logger.exception("모델 로드 실패: /optimize는 503을 반환합니다")
+    try:
+        logger.info("리스크 태그 %d건 로드", len(get_risk_tags()))
+    except Exception as error:
+        logger.warning("리스크 태그 없음: Safe-Guard 없이 모델 비중만 응답 (%s)", error)
     yield
 
 
@@ -397,16 +614,29 @@ class OptimizeRequest(BaseModel):
         ]
     )
     as_of: Optional[str] = Field(default=None, description="기준 시각. 없으면 최신")
-    risk_override: Optional[bool] = Field(default=True)
+    risk_override: Optional[bool] = Field(
+        default=True, description="리스크 태그 Safe-Guard 적용 여부"
+    )
+
+
+def _load_tags() -> tuple[Optional[pd.DataFrame], Optional[str]]:
+    """(태그 표, 실패 사유). 태그가 없어도 서버는 모델 비중으로 계속 응답한다."""
+    try:
+        return get_risk_tags(), None
+    except Exception as error:
+        return None, f"리스크 태그를 읽을 수 없습니다: {error}"
 
 
 @app.get("/health")
 def health_check():
+    tags, _ = _load_tags()
     base = {
         "service": "rl-engine",
         "version": app.version,
         "is_mock": False,
         "safeguard_mdd_limit": 0.15,
+        "risk_tags_loaded": tags is not None,
+        "risk_tag_count": 0 if tags is None else int(len(tags)),
     }
     try:
         schedule = get_schedule()
@@ -456,8 +686,44 @@ def optimize(req: OptimizeRequest):
         )
 
     index = schedule.index_for(req.as_of)
-    by_ticker = dict(zip(schedule.tickers, schedule.weights[index]))
-    weights: Dict[str, float] = {t: round(float(by_ticker[t]), 6) for t in req.tickers}
+
+    def by_request_order(values: np.ndarray) -> Dict[str, float]:
+        by_ticker = dict(zip(schedule.tickers, values))
+        return {t: round(float(by_ticker[t]), 6) for t in req.tickers}
+
+    raw = schedule.weights[index]
+    requested = bool(req.risk_override)
+    tags, reason = _load_tags()
+    guard = {
+        "requested": requested,
+        "available": tags is not None,
+        "rule": _guard_rule(schedule),
+        "moved_weight": 0.0,
+        "adjustments": [],
+        "tags": [],
+    }
+    final = raw
+    if tags is None:
+        guard["reason"] = reason
+    else:
+        decision = guard_decision(schedule, index, tags)
+        # 끈 상태에서도 어떤 신호가 있었는지는 보여 준다
+        guard["tags"] = decision["tags"]
+        if requested and decision["adjustments"]:
+            final = decision["weights"]
+            guard["adjustments"] = decision["adjustments"]
+            guard["moved_weight"] = decision["moved_weight"]
+    applied = bool(guard["adjustments"])
+
+    message = (
+        f"PPO 정책({schedule.model_name})의 목표 비중 "
+        "(수수료 0.015%, 슬리피지 0.05% 명세값으로 학습·평가)"
+    )
+    if applied:
+        message += (
+            f" · 리스크 태그 Safe-Guard가 {len(guard['adjustments'])}개 자산 비중을 "
+            f"{guard['moved_weight']:.1%}p 줄임"
+        )
 
     return {
         "status": "ok",
@@ -466,15 +732,28 @@ def optimize(req: OptimizeRequest):
         "model_used": schedule.model_name,
         "as_of": req.as_of,
         "decision_date": str(schedule.dates[index].date()),
-        "weights": weights,
+        "weights": by_request_order(final),
+        # Safe-Guard 적용 전 모델 원래 비중 (백테스트와 같은 값)
+        "model_weights": by_request_order(raw),
         "transaction_cost_bps": 1.5,
         "slippage_bps": 5.0,
+        # MDD 한도 Safe-Guard는 학습 환경의 조기 종료 규칙이라 서빙 응답에서는 항상 False
         "safeguard_triggered": False,
-        # 현재 모델은 RiskTag 없이 학습되어 risk_override를 비중에 반영할 수 없다
-        "risk_override_applied": False,
-        "message": (
-            f"PPO 정책({schedule.model_name})의 목표 비중 "
-            "(수수료 0.015%, 슬리피지 0.05% 명세값으로 학습·평가)"
-        ),
+        "risk_override_applied": applied,
+        "risk_guard": guard,
+        "message": message,
         "disclaimer": DISCLAIMER,
     }
+
+
+@app.get("/risk-tags")
+def risk_tags():
+    """리스크 태그 Safe-Guard가 현재 모델의 평가 구간에서 작동한 내역."""
+    try:
+        schedule = get_schedule()
+    except Exception as error:
+        raise HTTPException(503, f"모델을 사용할 수 없습니다: {error}") from error
+    tags, reason = _load_tags()
+    if tags is None:
+        raise HTTPException(503, reason)
+    return get_guard_summary(schedule, tags)

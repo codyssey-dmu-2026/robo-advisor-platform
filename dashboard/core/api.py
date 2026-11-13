@@ -90,6 +90,12 @@ def optimize(tickers: tuple[str, ...], risk_override: bool, as_of: str | None) -
     return _request("POST", "/optimize", json=payload)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def risk_tags() -> dict:
+    """리스크 태그 Safe-Guard가 현재 모델의 평가 구간에서 작동한 내역."""
+    return _request("GET", "/risk-tags")
+
+
 def research(question: str, tickers: list[str], as_of: str | None) -> dict:
     # 비운 값은 보내지 않아 에이전트가 질문에서 종목을 인식하고 요청 시각을 기준으로 삼게 한다
     payload = {"question": question, "tickers": tickers or None, "as_of": as_of}

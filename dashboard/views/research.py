@@ -2,12 +2,11 @@
 
 from datetime import date, datetime, time, timedelta, timezone
 
-import pandas as pd
 import streamlit as st
 
 from core import api
 from core.assets import DEFAULT_TICKERS, asset_name
-from core.ui import error_card, page_header
+from core.ui import error_card, page_header, risk_tag_table
 
 NODE_LABELS = {
     "planner": ("계획", ":material/checklist:", "질문을 검색어로 분해"),
@@ -178,37 +177,11 @@ if history:
         tags = r.get("risk_tags", [])
         if tags:
             st.caption(
-                "기준일에 유효한 위험 이벤트. 강화학습 관측 공간과 Safe-Guard에 반영됩니다."
+                "기준일에 유효한 위험 이벤트입니다. 위험 점수(심각도 × 신뢰도)가 높은 "
+                "자산은 포트폴리오 서빙 단계의 리스크 태그 Safe-Guard가 비중을 줄입니다 "
+                "(포트폴리오 현황 · 리스크 모니터링 화면에서 확인)."
             )
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "자산": asset_name(t["asset_id"]),
-                            "유형": t["risk_type"],
-                            "심각도": t["severity"],
-                            "신뢰도": t["confidence"],
-                            "유효 기간": (
-                                f"{str(t['available_at'])[:10]} ~ "
-                                f"{str(t['expires_at'])[:10]}"
-                            ),
-                            "출처": t["source_url"],
-                        }
-                        for t in tags
-                    ]
-                ),
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "심각도": st.column_config.ProgressColumn(
-                        min_value=0, max_value=1, format="%.2f"
-                    ),
-                    "신뢰도": st.column_config.ProgressColumn(
-                        min_value=0, max_value=1, format="%.2f"
-                    ),
-                    "출처": st.column_config.LinkColumn(display_text="원문"),
-                },
-            )
+            risk_tag_table(tags)
         else:
             st.info(
                 "기준일에 유효한 리스크 태그가 없습니다.",

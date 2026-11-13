@@ -8,7 +8,14 @@ import streamlit as st
 
 from core import api, charts
 from core.assets import ASSET_CLASSES, DEFAULT_TICKERS, asset_class, asset_name
-from core.ui import comparison_series, empty_state, load, page_header, table_view
+from core.ui import (
+    comparison_series,
+    empty_state,
+    load,
+    page_header,
+    risk_tag_table,
+    table_view,
+)
 
 perf = load(api.performance)
 page_header(
@@ -26,23 +33,60 @@ except api.ApiError:
 earliest = date.fromisoformat(rl_status.get("as_of_min", "2025-01-03"))
 latest = date.fromisoformat(rl_status.get("as_of_max", "2026-01-01"))
 
+# 리스크 태그 Safe-Guard가 작동한 날 목록 (없어도 화면은 그대로 동작)
+try:
+    guard_days = api.risk_tags().get("days", [])
+except api.ApiError:
+    guard_days = []
+guard_days = [
+    d for d in guard_days if earliest <= date.fromisoformat(d["as_of"]) <= latest
+]
+moved_on = {d["as_of"]: d for d in guard_days}
+
+# 기준일은 달력과 '발동일 바로가기' 양쪽에서 바꿀 수 있어 세션 상태로 관리한다
+picked = st.session_state.get("pf_as_of", latest)
+st.session_state["pf_as_of"] = min(max(picked, earliest), latest)
+
+
+def _jump_to_guard_day() -> None:
+    if st.session_state.get("pf_jump"):
+        st.session_state["pf_as_of"] = date.fromisoformat(st.session_state["pf_jump"])
+
+
+def _clear_jump() -> None:
+    st.session_state["pf_jump"] = None
+
+
 with st.container(border=True):
-    c1, c2, c3 = st.columns([3.6, 1.4, 1.6], vertical_alignment="bottom")
-    c1.markdown(
-        f"**투자 대상 자산** · 모델이 학습한 {len(DEFAULT_TICKERS)}개 자산 고정"
-    )
+    c1, c2, c3, c4 = st.columns([2.2, 1.3, 2.4, 1.5], vertical_alignment="bottom")
+    c1.markdown(f"**투자 대상** · 학습한 {len(DEFAULT_TICKERS)}개 자산 고정")
     as_of = c2.date_input(
         "기준일",
-        value=latest,
         min_value=earliest,
         max_value=latest,
+        key="pf_as_of",
+        on_change=_clear_jump,
         help="이 날짜 전에 끝난 거래일까지의 정보로만 판단 (미래 정보 누수 방지)",
     )
-    risk_override = c3.toggle(
+    c3.selectbox(
+        "리스크 태그 발동일로 이동",
+        [d["as_of"] for d in reversed(guard_days)],
+        index=None,
+        key="pf_jump",
+        on_change=_jump_to_guard_day,
+        format_func=lambda a: (
+            f"{a} · {moved_on[a]['moved_weight']:.1%}p 축소 · "
+            f"{len(moved_on[a]['assets'])}개 자산"
+        ),
+        placeholder=f"발동일 {len(guard_days)}일" if guard_days else "발동일 없음",
+        disabled=not guard_days,
+        help="리스크 태그 Safe-Guard가 비중을 조정한 기준일만 모아 둔 목록",
+    )
+    risk_override = c4.toggle(
         "리스크 태그 반영",
-        value=False,
-        disabled=True,
-        help="현재 모델은 리스크 태그 없이 학습되어 비중에 반영되지 않습니다",
+        value=True,
+        help="에이전트가 탐지한 위험 신호가 강한 자산의 비중을 자동으로 줄입니다 "
+        "(리스크 태그 Safe-Guard). 끄면 모델 원래 비중을 봅니다",
     )
 
 as_of_iso = datetime.combine(as_of, time(0), tzinfo=timezone.utc).isoformat()
@@ -62,8 +106,36 @@ if opt:
             icon=":material/science:",
         )
     ranked = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+    guard = opt.get("risk_guard") or {}
+    adjustments = guard.get("adjustments", [])
+    live_tags = guard.get("tags", [])
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("편입 자산", f"{len(weights)}개", border=True, height="stretch")
+    if not guard.get("available"):
+        k1.metric(
+            "리스크 태그 Safe-Guard",
+            "—",
+            border=True,
+            height="stretch",
+            help=guard.get("reason") or "리스크 태그를 불러오지 못해 모델 비중 그대로",
+        )
+    else:
+        if adjustments:
+            headline = f"{len(adjustments)}개 축소"
+            detail = f"비중 {guard['moved_weight'] * 100:.1f}%p 이동"
+        else:
+            headline = "조정 없음" if guard.get("requested") else "꺼짐"
+            detail = f"유효 태그 {len(live_tags)}건"
+        k1.metric(
+            "리스크 태그 Safe-Guard",
+            headline,
+            detail,
+            delta_color="off",
+            delta_arrow="off",
+            border=True,
+            height="stretch",
+            help="결정일에 유효한 위험 이벤트의 점수(심각도 × 신뢰도)가 "
+            f"{guard['rule']['threshold']:.2f} 이상이면 그 자산 비중을 줄입니다",
+        )
     k2.metric(
         "최대 비중",
         f"{ranked[0][1]:.1%}",
@@ -89,11 +161,11 @@ if opt:
         ]
         drawdown = past[-1] if past else None
     if drawdown is None:
-        k4.metric("Safe-Guard", "—", border=True, help="낙폭 정보를 불러오지 못함")
+        k4.metric("MDD Safe-Guard", "—", border=True, help="낙폭 정보를 불러오지 못함")
     else:
         over = drawdown > perf["mdd_limit"]
         k4.metric(
-            "Safe-Guard",
+            "MDD Safe-Guard",
             "한도 초과" if over else "정상",
             f"낙폭 {-drawdown:.1%}",
             delta_color="inverse" if over else "off",
@@ -101,6 +173,60 @@ if opt:
             border=True,
             help="결정일 기준 고점 대비 낙폭. 15%를 넘으면 한도 초과",
         )
+
+    # ---------------- 리스크 태그 Safe-Guard 조정 내역 ----------------
+    if adjustments:
+        rule = guard["rule"]
+        with st.container(border=True):
+            st.markdown("**리스크 태그 Safe-Guard 조정 내역**")
+            st.caption(
+                f"{opt.get('decision_date', '-')} 장 마감 기준으로 유효한 위험 이벤트를 "
+                f"반영했습니다. 위험 점수(심각도 × 신뢰도)가 {rule['threshold']:.2f} "
+                f"이상인 자산은 비중을 (점수 × {rule['max_cut']:.0%})만큼 줄이고, 줄인 "
+                f"비중은 신호가 없는 자산에 원래 비율대로 나눕니다 "
+                f"(자산당 상한 {rule['max_weight']:.0%})."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "자산": asset_name(a["asset"]),
+                            "위험 점수": a["score"],
+                            "모델 비중": a["before"],
+                            "조정 후": a["after"],
+                            "변화 (%p)": (a["after"] - a["before"]) * 100,
+                        }
+                        for a in adjustments
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "위험 점수": st.column_config.ProgressColumn(
+                        min_value=0, max_value=1, format="%.2f"
+                    ),
+                    "모델 비중": st.column_config.NumberColumn(format="percent"),
+                    "조정 후": st.column_config.NumberColumn(format="percent"),
+                    "변화 (%p)": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+            with st.expander(
+                f"근거가 된 리스크 태그 {len(live_tags)}건", icon=":material/link:"
+            ):
+                risk_tag_table(live_tags)
+            st.caption(
+                ":material/info: 서빙 단계에서 적용하는 규칙입니다. 아래 백테스트 "
+                "성과는 이 조정 없이 모델 원래 비중으로 계산한 값입니다."
+            )
+    elif live_tags:
+        with st.container(border=True):
+            st.markdown("**기준일에 유효한 리스크 태그**")
+            st.caption(
+                "리스크 태그 반영이 꺼져 있어 모델 원래 비중을 표시합니다."
+                if not guard.get("requested")
+                else "신호가 기준보다 약해 비중은 조정하지 않았습니다."
+            )
+            risk_tag_table(live_tags)
 
     left, right = st.columns([3, 2], gap="medium")
     with left, st.container(border=True):
@@ -124,17 +250,21 @@ if opt:
             ),
             key="pf_donut",
         )
+    model_weights = opt.get("model_weights") or {}
     table_view(
         pd.DataFrame(
             [
                 {"자산": asset_name(t), "자산군": asset_class(t), "비중": w}
+                # Safe-Guard가 비중을 바꾼 날에는 모델 원래 비중을 나란히 보여 준다
+                | ({"모델 비중": model_weights.get(t)} if adjustments else {})
                 for t, w in ranked
             ]
         ),
         column_config={
             "비중": st.column_config.ProgressColumn(
                 format="percent", min_value=0, max_value=1
-            )
+            ),
+            "모델 비중": st.column_config.NumberColumn(format="percent"),
         },
     )
     st.caption(

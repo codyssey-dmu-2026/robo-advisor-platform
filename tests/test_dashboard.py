@@ -10,8 +10,10 @@ from pathlib import Path
 # 대시보드 모듈이 처음 import될 때 주소를 읽으므로, 연결되지 않는 주소를 먼저 지정
 os.environ["GATEWAY_URL"] = "http://127.0.0.1:9"
 
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
+from conftest import risk_tag  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -77,7 +79,7 @@ class _Response:
 
 
 @pytest.fixture
-def online_gateway(perf_results, monkeypatch):
+def online_gateway(perf_results, write_tags, monkeypatch):
     """Gateway 응답을 실제 형식의 성과 데이터로 대체 (RL 성과 화면 렌더링 검증용)."""
     import requests
     import streamlit as st
@@ -102,8 +104,19 @@ def online_gateway(perf_results, monkeypatch):
         "TLT",
         "VNQ",
     ]
+    # 리스크 태그 Safe-Guard: 01-03 장 마감에 NVDA 위험 신호(점수 0.8)가 공개된 상황
+    schedule = rl_server.PolicySchedule(
+        model_name="fake",
+        tickers=tickers,
+        dates=pd.DatetimeIndex(["2025-01-02", "2025-01-03", "2025-01-06"]),
+        weights=np.full((3, len(tickers)), 1 / len(tickers)),
+    )
+    write_tags(risk_tag("NVDA", 0.8, "2025-01-03T16:00:00-05:00"))
+    tags = rl_server.get_risk_tags()
+    decision = rl_server.guard_decision(schedule, 2, tags)
     responses = {
         "/performance": perf,
+        "/risk-tags": rl_server.build_guard_summary(schedule, tags),
         "/health": {
             "gateway": "ok",
             "services": {
@@ -116,9 +129,19 @@ def online_gateway(perf_results, monkeypatch):
         },
         "/optimize": {
             "status": "ok",
-            "weights": {t: 1 / len(tickers) for t in tickers},
+            "weights": dict(zip(tickers, decision["weights"].tolist())),
+            "model_weights": dict(zip(tickers, schedule.weights[2].tolist())),
             "decision_date": "2025-01-06",
             "model_used": "fake",
+            "risk_override_applied": True,
+            "risk_guard": {
+                "requested": True,
+                "available": True,
+                "rule": rl_server._guard_rule(schedule),
+                "moved_weight": decision["moved_weight"],
+                "adjustments": decision["adjustments"],
+                "tags": decision["tags"],
+            },
         },
     }
 
@@ -150,6 +173,42 @@ def test_18_dashboard_renders_real_performance(online_gateway, page):
     assert any("실데이터" in t for t in texts)
     failures = ("연결할 수 없습니다", "요청이 실패했습니다", "응답 시간이 초과")
     assert not any(f in t for t in texts for f in failures), "API 오류 카드가 표시됨"
+
+
+def _page(path: str) -> AppTest:
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.switch_page(path)
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    return at
+
+
+def test_19_portfolio_shows_risk_tag_adjustments(online_gateway):
+    """19. 포트폴리오 화면이 리스크 태그 Safe-Guard의 조정 내역과 발동일 바로가기를 보여 주는지 검증"""
+    at = _page("views/portfolio.py")
+    texts = [m.value for m in at.markdown]
+    assert any("리스크 태그 Safe-Guard 조정 내역" in t for t in texts)
+    guard_kpi = next(m for m in at.metric if m.label == "리스크 태그 Safe-Guard")
+    assert guard_kpi.value == "1개 축소"
+    table = next(d.value for d in at.dataframe if "조정 후" in d.value.columns)
+    assert table["조정 후"].iloc[0] == pytest.approx(1 / 12 * (1 - 0.5 * 0.8))
+    assert at.toggle[0].value is True  # 기본값: 리스크 태그 반영 켜짐
+
+    # 발동일 바로가기를 고르면 기준일이 그 날짜로 바뀐다
+    jump = at.selectbox(key="pf_jump")
+    assert list(jump.options) and jump.value is None
+    jump.select("2025-01-04").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert str(at.date_input(key="pf_as_of").value) == "2025-01-04"
+
+
+def test_20_risk_page_shows_risk_tag_guard_summary(online_gateway):
+    """20. 리스크 화면이 리스크 태그 Safe-Guard 발동 현황(발동일 수)과 한계 안내를 보여 주는지 검증"""
+    at = _page("views/risk.py")
+    days = next(m for m in at.metric if m.label == "발동일")
+    assert days.value == "2일"
+    assert any("백테스트 성과에는" in c.value for c in at.caption)
 
 
 @pytest.mark.parametrize("page", [None, *PAGES])

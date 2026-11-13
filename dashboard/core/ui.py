@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from core.api import ApiError
+from core.assets import asset_name
 
 DISCLAIMER = (
     "본 시스템은 교육 목적으로 개발되었으며 실제 투자 조언이나 자문에 사용할 수 없습니다. "
@@ -47,6 +48,54 @@ STRATEGY_LABELS = {
     "PPO-mdd_l1.0": "PPO · MDD 페널티 λ1.0",
     "PPO-mdd_l5.0": "PPO · MDD 페널티 λ5.0",
 }
+
+
+# agentic-research RiskTag의 위험 유형 (risk/taxonomy.py의 RiskType)
+RISK_TYPE_LABELS = {
+    "price_shock": "급등락",
+    "earnings_shock": "실적 쇼크",
+    "regulation": "규제 변경",
+    "litigation": "소송",
+    "geopolitical": "지정학",
+    "macro_rate": "금리·거시",
+}
+
+
+def risk_type_label(risk_type: str | None) -> str:
+    return RISK_TYPE_LABELS.get(risk_type or "", risk_type or "-")
+
+
+def risk_tag_table(tags: list[dict]) -> None:
+    """리스크 태그 목록 표. 위험 점수 = 심각도 × 신뢰도, 출처는 원문 링크.
+
+    Safe-Guard 응답의 태그(applied 포함)와 리서치 응답의 태그를 모두 받는다.
+    """
+    rows = []
+    for t in tags:
+        row = {
+            "자산": asset_name(t["asset_id"]),
+            "유형": risk_type_label(t.get("risk_type")),
+            "위험 점수": float(t["severity"]) * float(t["confidence"]),
+            "심각도": t["severity"],
+            "신뢰도": t["confidence"],
+            "유효 기간": f"{str(t['available_at'])[:10]} ~ {str(t['expires_at'])[:10]}",
+            "출처": t["source_url"],
+        }
+        if "applied" in t:
+            row["비중 반영"] = "반영" if t["applied"] else "기준 미만"
+        rows.append(row)
+    bar = st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.2f")
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "위험 점수": bar,
+            "심각도": bar,
+            "신뢰도": bar,
+            "출처": st.column_config.LinkColumn(display_text="원문"),
+        },
+    )
 
 
 def perf_label(entry: dict) -> str:
