@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Path as PathParam
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 import asyncio
@@ -63,23 +63,183 @@ class OptimizeRequest(BaseModel):
 
 
 class ExplainRequest(BaseModel):
-    run_id: str = Field(..., description="실행 ID")
-    decision_id: str = Field(..., description="의사결정 ID")
-    target_asset: str = Field(..., description="대상 자산 티커")
+    # evaluation-xai /explain 요청 규칙과 같은 형식 제한 (잘못된 값은 Gateway에서 422)
+    run_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,80}$", description="실행 ID")
+    decision_id: str = Field(
+        ..., pattern=r"^[A-Za-z0-9_-]{1,80}$", description="의사결정 ID"
+    )
+    target_asset: str = Field(
+        ..., pattern=r"^[A-Za-z0-9_.-]{1,30}$", description="대상 자산 티커"
+    )
 
 
 class ResearchRequest(BaseModel):
+    # agentic-research /research 요청 규칙과 동일. 종목·기준일은 강제하지 않는다
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"question": "삼성전자 최근 실적과 리스크는?"},
+                {
+                    "question": "엔비디아 실적 발표가 주가에 준 영향은?",
+                    "tickers": ["NVDA"],
+                    "as_of": "2025-12-31T16:00:00-05:00",
+                },
+            ]
+        }
+    )
+
     question: str = Field(
-        default="엔비디아 2024년 실적 발표", description="투자 리서치 질문"
+        ..., min_length=2, max_length=500, description="투자 리서치 질문"
     )
-    tickers: Optional[List[str]] = Field(default=["NVDA"], description="관련 티커 목록")
-    as_of: Optional[str] = Field(
-        default="2024-12-31T00:00:00-05:00", description="기준 시각 (ISO 8601)"
+    tickers: Optional[List[str]] = Field(
+        default=None,
+        max_length=12,
+        description="관련 티커. 생략하면 에이전트가 질문에서 종목을 인식",
     )
+    as_of: Optional[AwareDatetime] = Field(
+        default=None,
+        description="기준 시각(시간대 포함 ISO 8601). 이 시각 이전 문서만 사용, 생략하면 요청 시각",
+    )
+
+
+# --- 응답 스키마 (Swagger 문서용) ---
+# 하위 서비스 응답을 그대로 전달하는 엔드포인트는 핵심 필드만 정의하고 나머지 필드도 통과시킨다
+class PassThrough(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class ServiceStatus(PassThrough):
+    status: str = Field(description="ok / degraded / error / offline")
+
+
+class HealthResponse(BaseModel):
+    gateway: str
+    services: Dict[str, ServiceStatus] = Field(
+        description="evaluation_xai, agentic_research, rl_engine 상태"
+    )
+
+
+class OptimizeResponse(PassThrough):
+    status: str = Field(
+        description="ok: 실제 모델 / mock_fallback: RL 장애 시 동일 비중"
+    )
+    weights: Dict[str, float] = Field(description="자산별 비중 (합 1.0)")
+    as_of: Optional[str] = None
+    decision_date: Optional[str] = Field(
+        default=None, description="비중을 결정한 거래일 (장 마감 후)"
+    )
+    model_used: Optional[str] = None
+    is_mock: Optional[bool] = None
+    safeguard_triggered: bool
+    risk_override_applied: Optional[bool] = None
+    message: Optional[str] = None
+    disclaimer: str
+
+
+class ExplainResponse(PassThrough):
+    run_id: str
+    decision_id: str
+    target_asset: str
+    data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    method: Optional[str] = None
+    base_value: Optional[float] = None
+    predicted_weight: Optional[float] = None
+    groups: Optional[List[Any]] = Field(default=None, description="피처 그룹 이름")
+    contributions: Optional[List[Any]] = Field(
+        default=None, description="그룹별 SHAP 기여도"
+    )
+    interpretation: Optional[str] = None
+    disclaimer: Optional[str] = None
+
+
+class ResearchResponse(PassThrough):
+    question: str
+    answer: str
+    opinion: Optional[str] = None
+    confidence: Optional[float] = None
+    claims: Optional[List[Dict[str, Any]]] = None
+    citations: List[Dict[str, Any]] = Field(description="원문 출처")
+    risk_tags: Optional[List[Any]] = None
+    trace: List[Dict[str, Any]] = Field(description="단계별 추론 과정")
+    elapsed_ms: Optional[int] = None
+    disclaimer: Optional[str] = None
+
+
+class BacktestResponse(PassThrough):
+    data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    runs: Dict[str, Dict[str, Any]] = Field(description="실행별 12개 지표")
+    mission_anova: Optional[Any] = Field(default=None, description="ANOVA 검증 결과")
+    bootstrap: Optional[Any] = None
+    disclaimer: Optional[str] = None
+
+
+class PerformanceResponse(PassThrough):
+    data_mode: str
+    model_name: str
+    strategy: str
+    seed: str
+    benchmark: str
+    windows: List[Dict[str, Any]] = Field(description="Walk-Forward 테스트 구간")
+    strategies: List[Dict[str, Any]] = Field(
+        description="현재 모델·동일가중·벤치마크·다른 보상 함수의 12개 지표"
+    )
+    series: Dict[str, Any] = Field(description="4년 연결 누적 수익률·낙폭")
+    breaches: List[Dict[str, Any]] = Field(description="Safe-Guard 한도 초과 구간")
+    mdd_limit: float
+    weights: Optional[Dict[str, Any]] = Field(
+        default=None, description="현재 모델의 날짜별 목표 비중"
+    )
+    disclaimer: str
+
+
+class TimeseriesResponse(BaseModel):
+    run_id: str
+    dates: List[str]
+    equity: List[Optional[float]]
+    cumulative_return: List[Optional[float]]
+    drawdown: List[Optional[float]]
+    net_return: List[Optional[float]]
+    safeguard_triggered: List[bool]
+    guard_active: List[bool]
+    weights: Dict[str, List[Optional[float]]]
+    source: str
+    disclaimer: str
+
+
+async def _forward(
+    method: str, url: str, service: str, *, timeout: float, json: Any = None
+) -> Any:
+    """하위 서비스 호출. 시간 초과는 504, 연결 실패는 503, 오류 응답은 상태 코드 그대로."""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            r = await client.request(method, url, json=json)
+        except httpx.TimeoutException as e:
+            raise HTTPException(
+                status_code=504,
+                detail=f"{service} 응답이 {timeout:.1f}초 안에 오지 않았습니다 "
+                "(요청 1건 5초 기준)",
+            ) from e
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"{service}에 연결할 수 없습니다: {e}"
+            ) from e
+    if r.status_code != 200:
+        try:
+            body = r.json()
+            detail = body.get("detail", body) if isinstance(body, dict) else body
+        except ValueError:
+            detail = r.text[:200]
+        raise HTTPException(status_code=r.status_code, detail=detail)
+    return r.json()
 
 
 # 1. GET /health : 서버 상태 및 모델 로드 여부 반환
-@app.get("/health", summary="1. 전체 서비스 상태 및 모델 로드 여부 확인")
+@app.get(
+    "/health",
+    summary="1. 전체 서비스 상태 및 모델 로드 여부 확인",
+    response_model=HealthResponse,
+    response_model_exclude_unset=True,
+)
 async def health_check():
     targets = [
         ("evaluation_xai", EVAL_API_URL),
@@ -108,7 +268,12 @@ async def health_check():
 
 
 # 2. POST /optimize : 현재 시장 데이터 기반 최적 포트폴리오 비중 반환
-@app.post("/optimize", summary="2. 강화학습 기반 최적 포트폴리오 비중 추론")
+@app.post(
+    "/optimize",
+    summary="2. 강화학습 기반 최적 포트폴리오 비중 추론",
+    response_model=OptimizeResponse,
+    response_model_exclude_unset=True,
+)
 async def optimize_portfolio(req: OptimizeRequest):
     r = None
     async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
@@ -131,80 +296,76 @@ async def optimize_portfolio(req: OptimizeRequest):
         "as_of": req.as_of,
         "weights": {t: w for t in req.tickers},
         "safeguard_triggered": False,
-        "disclaimer": "본 결과는 교육 목적이며 실제 투자 조언에 사용할 수 없습니다.",
+        "disclaimer": DISCLAIMER,
     }
 
 
-@app.get("/performance", summary="(보조) 현재 RL 모델의 Walk-Forward 백테스트 성과")
+@app.get(
+    "/performance",
+    summary="(보조) 현재 RL 모델의 Walk-Forward 백테스트 성과",
+    response_model=PerformanceResponse,
+    response_model_exclude_unset=True,
+)
 async def rl_performance():
     """대시보드 성과·리스크 화면용. 동일가중·SPY·다른 보상 함수와의 비교 포함."""
-    async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
-        try:
-            r = await client.get(f"{RL_API_URL}/performance")
-        except Exception as e:
-            raise HTTPException(
-                status_code=503, detail=f"RL Engine(8002) 연결 실패: {e}"
-            ) from e
-    if r.status_code != 200:
-        try:
-            detail = r.json().get("detail")
-        except ValueError:
-            detail = r.text[:200]
-        raise HTTPException(status_code=r.status_code, detail=detail)
-    return r.json()
+    return await _forward(
+        "GET",
+        f"{RL_API_URL}/performance",
+        "RL Engine(8002)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
 
 
 # 3. POST /explain : 특정 의사결정에 대한 SHAP 해석 반환
-@app.post("/explain", summary="3. 특정 의사결정에 대한 SHAP 해석 반환")
+@app.post(
+    "/explain",
+    summary="3. 특정 의사결정에 대한 SHAP 해석 반환",
+    response_model=ExplainResponse,
+    response_model_exclude_unset=True,
+)
 async def explain_decision(req: ExplainRequest):
-    payload = {k: v for k, v in req.model_dump().items() if v is not None}
-    async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
-        try:
-            r = await client.post(f"{EVAL_API_URL}/explain", json=payload)
-            if r.status_code != 200:
-                raise HTTPException(status_code=r.status_code, detail=r.json())
-            return r.json()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=503, detail=f"Evaluation API 통신 실패: {e}"
-            )
+    return await _forward(
+        "POST",
+        f"{EVAL_API_URL}/explain",
+        "Evaluation API(8000)",
+        timeout=UPSTREAM_TIMEOUT_S,
+        json=req.model_dump(),
+    )
 
 
 # 4. POST /research : 투자 질문에 대한 에이전틱 리서치 결과 반환
-@app.post("/research", summary="4. 투자 질문에 대한 LangGraph 에이전틱 리서치 수행")
+@app.post(
+    "/research",
+    summary="4. 투자 질문에 대한 LangGraph 에이전틱 리서치 수행",
+    response_model=ResearchResponse,
+    response_model_exclude_unset=True,
+)
 async def research_market(req: ResearchRequest):
-    payload = {k: v for k, v in req.model_dump().items() if v is not None}
-    async with httpx.AsyncClient(timeout=RESEARCH_TIMEOUT_S) as client:
-        try:
-            r = await client.post(f"{AGENT_API_URL}/research", json=payload)
-            if r.status_code != 200:
-                raise HTTPException(status_code=r.status_code, detail=r.json())
-            return r.json()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Research API 통신 실패: {e}")
+    # 생략한 값은 보내지 않아 에이전트의 기본 동작(질문에서 종목 인식, 요청 시각 기준)을 따른다
+    payload = req.model_dump(mode="json", exclude_none=True)
+    return await _forward(
+        "POST",
+        f"{AGENT_API_URL}/research",
+        "Research API(8001)",
+        timeout=RESEARCH_TIMEOUT_S,
+        json=payload,
+    )
 
 
 # 5. GET /backtest : 백테스트 성과 지표 반환
 @app.get(
-    "/backtest", summary="5. Walk-Forward 백테스트 12개 지표 및 ANOVA 검증 결과 반환"
+    "/backtest",
+    summary="5. Walk-Forward 백테스트 12개 지표 및 ANOVA 검증 결과 반환",
+    response_model=BacktestResponse,
+    response_model_exclude_unset=True,
 )
 async def get_backtest():
-    async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S) as client:
-        try:
-            r = await client.get(f"{EVAL_API_URL}/backtest")
-            if r.status_code != 200:
-                raise HTTPException(status_code=r.status_code, detail=r.json())
-            return r.json()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=503, detail=f"Evaluation API 통신 실패: {e}"
-            )
+    return await _forward(
+        "GET",
+        f"{EVAL_API_URL}/backtest",
+        "Evaluation API(8000)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
 
 
 # 6. GET /backtest/{run_id}/timeseries : 대시보드 차트용 일별 시계열 (5대 필수 엔드포인트 외 보조 API)
@@ -223,6 +384,7 @@ def _clean(values) -> List[Optional[float]]:
 @app.get(
     "/backtest/{run_id}/timeseries",
     summary="6. 백테스트 일별 자산가치·낙폭·비중 시계열 (대시보드 차트용)",
+    response_model=TimeseriesResponse,
 )
 def get_backtest_timeseries(
     run_id: str = PathParam(

@@ -1,6 +1,6 @@
 """에이전트 리서치: 질문 입력 → 추론 과정(Reasoning Trace) → 출처가 포함된 결과."""
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -68,8 +68,9 @@ with st.form("research_form", border=True):
     )
     as_of = c2.date_input(
         "기준일",
-        value=date(2024, 12, 31),
-        help="이 시점 이전에 공개된 문서만 사용 (미래 정보 누수 방지)",
+        value=date.today(),
+        max_value=date.today(),
+        help="이 날짜까지 공개된 문서만 사용 (미래 정보 누수 방지). 오늘이면 지금 시각 기준",
     )
     submitted = st.form_submit_button(
         "리서치 실행", type="primary", icon=":material/send:", width="stretch"
@@ -79,7 +80,14 @@ if submitted:
     if len(question.strip()) < 2:
         st.warning("질문을 2자 이상 입력하세요.", icon=":material/edit:")
     else:
-        as_of_iso = datetime.combine(as_of, time(0), tzinfo=timezone.utc).isoformat()
+        # 오늘이면 생략(에이전트가 요청 시각 사용), 과거 날짜면 그날이 끝나는 시각까지
+        as_of_iso = (
+            None
+            if as_of >= date.today()
+            else datetime.combine(
+                as_of + timedelta(days=1), time(0), tzinfo=timezone.utc
+            ).isoformat()
+        )
         with st.status("에이전트가 리서치 중입니다…", expanded=False) as status:
             st.write(
                 "계획 → 검색 → 관련성 평가 → (필요 시 쿼리 재작성) → 분석 → 인용 검증 → 최종 리포트"
