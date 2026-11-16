@@ -6,7 +6,7 @@
 # - 로컬 형제 폴더(../)의 작업 중 코드로 빌드하려면 docker-compose.local.yml을 함께 사용
 #
 # 팀원 레포 커밋 고정값 (갱신 시 아래 build.context의 #<sha>를 함께 변경)
-#   agentic-research  bdd5b84 / evaluation-xai a5506cd / data-pipeline 0bbd15f
+#   agentic-research  c395f1a / evaluation-xai a5506cd / data-pipeline 0bbd15f
 #   rl-engine 05579d2 와 모델 번들(Release models-v1)은 Dockerfile.rl에서 고정
 #   (eval-bootstrap의 EVAL_COMMIT·RL_ENGINE_COMMIT도 같은 값으로 맞춘다)
 
@@ -61,7 +61,7 @@ services:
   # ---------------------------------------------------------------
   agent-bootstrap:
     build: &agent-build
-      context: https://github.com/codyssey-dmu-2026/agentic-research.git#bdd5b84df154ad84ec10ee60a7ecaba5c3fab61d
+      context: https://github.com/codyssey-dmu-2026/agentic-research.git#c395f1a341fe46677edeed49cc114b958efe6fc6
       dockerfile: Dockerfile
     image: robo-agentic-research:local
     container_name: robo-agent-bootstrap
