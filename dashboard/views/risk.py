@@ -1,6 +1,7 @@
 """리스크 모니터링: VaR/CVaR 게이지, MDD 추이, Safe-Guard 알림 (현재 모델의 실제 백테스트).
 
-아래쪽에는 리스크 태그 Safe-Guard(위험 이벤트 → 비중 축소)의 발동 현황을 보여 준다.
+아래쪽에는 리스크 태그 Safe-Guard(위험 이벤트 → 비중 축소)의 발동 현황과
+끔/켬 백테스트 비교를 보여 준다.
 """
 
 import pandas as pd
@@ -262,3 +263,114 @@ if guard:
         ):
             risk_tag_table(guard["tags"])
     st.caption(f":material/info: {guard['limitation']}")
+
+    # ---------------- 켬/끔 백테스트 ----------------
+    st.markdown("#### Safe-Guard 끔/켬 백테스트 비교")
+    bt = load(api.guard_backtest, spinner="Safe-Guard 끔/켬 백테스트 불러오는 중…")
+    if bt:
+        off, on = bt["metrics"]["model"], bt["metrics"]["guarded"]
+        diff = bt["difference"]
+        st.caption(
+            f"현재 모델의 평가 구간 {bt['period']['start']} ~ {bt['period']['end']} "
+            f"({bt['trading_days']}거래일)을 같은 모델·같은 환경으로 두 번 재생했습니다. "
+            "Safe-Guard로 바꾼 비중으로 체결하고 그 비중이 다음 날 모델 입력에 들어가는 "
+            "폐루프 방식이며, 거래비용·체결 규칙은 rl-engine 평가와 같습니다."
+        )
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric(
+            "누적 수익률 (켬)",
+            pct(on["cumulative_return"]),
+            f"{diff['cumulative_return'] * 100:+.1f}%p vs 끔",
+            border=True,
+        )
+        b2.metric(
+            "최대 낙폭 MDD (켬)",
+            pct(on["mdd"]),
+            f"{diff['mdd'] * 100:+.1f}%p vs 끔",
+            delta_color="inverse",
+            border=True,
+        )
+        b3.metric(
+            "샤프비율 (켬)",
+            f"{on['sharpe']:.2f}",
+            f"{diff['sharpe']:+.2f} vs 끔",
+            border=True,
+        )
+        b4.metric(
+            "하루 평균 회전율 (켬)",
+            f"{on['avg_turnover']:.2f}",
+            f"{diff['avg_turnover']:+.3f} vs 끔",
+            delta_color="inverse",
+            border=True,
+            help="비중 변화량 합계. 클수록 거래비용이 큼",
+        )
+        dates = bt["series"]["dates"]
+        lines = {
+            "Safe-Guard 끔 (모델 비중)": (
+                dates,
+                bt["series"]["model"]["cumulative_return"],
+            ),
+            "Safe-Guard 켬": (dates, bt["series"]["guarded"]["cumulative_return"]),
+        }
+        gap = [
+            on_value - off_value
+            for on_value, off_value in zip(
+                bt["series"]["guarded"]["cumulative_return"],
+                bt["series"]["model"]["cumulative_return"],
+            )
+        ]
+        left, right = st.columns([3, 2], gap="medium")
+        with right, st.container(border=True):
+            st.markdown("**누적 수익률 차이 (켬 − 끔)**")
+            st.caption("0보다 위면 Safe-Guard를 켠 쪽이 앞선 날입니다.")
+            gap_lines = {"켬 − 끔": (dates, gap)}
+            charts.show(
+                charts.line(
+                    gap_lines, colors=charts.color_map(list(gap_lines)), height=300
+                ),
+                key="guard_backtest_gap",
+            )
+        with left, st.container(border=True):
+            st.markdown("**누적 수익률 비교**")
+            st.caption("같은 모델로 Safe-Guard만 끄고 켠 두 재생입니다.")
+            charts.show(
+                charts.line(lines, colors=charts.color_map(list(lines)), height=300),
+                key="guard_backtest_line",
+            )
+            labels = {
+                "cumulative_return": "누적 수익률",
+                "cagr": "CAGR",
+                "annualized_volatility": "연환산 변동성",
+                "var_95": "VaR 95%",
+                "cvar_95": "CVaR 95%",
+                "mdd": "MDD",
+                "sharpe": "샤프비율",
+                "sortino": "소르티노",
+                "calmar": "Calmar",
+                "avg_turnover": "평균 회전율",
+            }
+            table_view(
+                pd.DataFrame(
+                    [
+                        {
+                            "지표": label,
+                            "끔": off.get(key),
+                            "켬": on.get(key),
+                            "차이 (켬 − 끔)": diff.get(key),
+                        }
+                        for key, label in labels.items()
+                    ]
+                ),
+                column_config={
+                    c: st.column_config.NumberColumn(format="%.4f")
+                    for c in ["끔", "켬", "차이 (켬 − 끔)"]
+                },
+            )
+        check = bt.get("reproduces_published")
+        if check:
+            st.caption(
+                ":material/fact_check: 끈 쪽 재생을 rl-engine 공개 결과와 "
+                f"{check['matched_days']}거래일 대조: 일별 수익률 최대 차이 "
+                f"{check['max_abs_diff']:.1e}"
+            )
+        st.caption(f":material/info: {bt['limitation']}")

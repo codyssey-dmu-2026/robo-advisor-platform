@@ -27,8 +27,10 @@ def no_risk_tags(tmp_path, monkeypatch):
     """개발 PC에 있는 실제 리스크 태그 파일이 결과를 바꾸지 않게 기본은 '태그 없음'으로 둔다."""
     monkeypatch.setattr(rl_server, "RISK_TAGS_PATH", tmp_path / "none" / "tags.jsonl")
     rl_server.get_risk_tags.cache_clear()
+    rl_server.get_guard_backtest.cache_clear()
     yield
     rl_server.get_risk_tags.cache_clear()
+    rl_server.get_guard_backtest.cache_clear()
 
 
 def risk_tag(

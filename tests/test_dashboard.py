@@ -129,6 +129,43 @@ SHAP_EXPLAIN = {
 PLOTS = "/explain/plots/toy_policy/toy0/SYN00"
 
 
+def _guard_backtest() -> dict:
+    """/risk-tags/backtest 응답 형식 (켬 쪽 누적 +2%p, MDD −1%p)."""
+    keys = [
+        "cumulative_return",
+        "cagr",
+        "annualized_volatility",
+        "var_95",
+        "cvar_95",
+        "mdd",
+        "sharpe",
+        "sortino",
+        "calmar",
+        "avg_turnover",
+    ]
+    off = dict.fromkeys(keys, 0.1) | {"cumulative_return": 0.40, "mdd": 0.17}
+    on = off | {"cumulative_return": 0.42, "mdd": 0.16, "sharpe": 0.12}
+    dates = ["2025-01-03", "2025-01-06"]
+    return {
+        "status": "ok",
+        "model_name": "fake",
+        "period": {"start": dates[0], "end": dates[-1]},
+        "trading_days": 2,
+        "method": "폐루프 재생",
+        "adjusted_days": 1,
+        "metrics": {"model": off, "guarded": on},
+        "difference": {k: on[k] - off[k] for k in keys},
+        "series": {
+            "dates": dates,
+            "model": {"cumulative_return": [0.0, 0.40], "drawdown": [0.0, 0.0]},
+            "guarded": {"cumulative_return": [0.0, 0.42], "drawdown": [0.0, 0.0]},
+        },
+        "reproduces_published": {"matched_days": 2, "max_abs_diff": 2e-7},
+        "limitation": "평가 구간 1년만 비교한 결과입니다.",
+        "disclaimer": "교육 목적",
+    }
+
+
 def _png() -> bytes:
     """1×1 PNG (st.image가 읽을 수 있는 최소 이미지)."""
     import base64
@@ -188,6 +225,7 @@ def online_gateway(perf_results, write_tags, monkeypatch):
         f"{PLOTS}/summary": _png(),
         f"{PLOTS}/force": b"<html><body>force plot</body></html>",
         "/risk-tags": rl_server.build_guard_summary(schedule, tags),
+        "/risk-tags/backtest": _guard_backtest(),
         "/health": {
             "gateway": "ok",
             "services": {
@@ -283,6 +321,18 @@ def test_20_risk_page_shows_risk_tag_guard_summary(online_gateway):
     days = next(m for m in at.metric if m.label == "발동일")
     assert days.value == "2일"
     assert any("백테스트 성과에는" in c.value for c in at.caption)
+
+
+def test_23_risk_page_compares_guard_on_and_off(online_gateway):
+    """23. 리스크 화면이 Safe-Guard 끔/켬 백테스트의 지표 차이와 공개 결과 대조를 보여 주는지 검증"""
+    at = _page("views/risk.py")
+    cum = next(m for m in at.metric if m.label == "누적 수익률 (켬)")
+    assert cum.value == "42.0%" and "+2.0%p" in cum.delta
+    mdd = next(m for m in at.metric if m.label == "최대 낙폭 MDD (켬)")
+    assert "-1.0%p" in mdd.delta
+    assert any("2거래일 대조" in c.value for c in at.caption)
+    table = next(d.value for d in at.dataframe if "차이 (켬 − 끔)" in d.value.columns)
+    assert len(table) == 10
 
 
 def test_21_anova_page_shows_real_reward_test(online_gateway):
