@@ -166,16 +166,29 @@ def line(
                 hovertemplate="%{y:.2%}" if percent_y else "%{y:,.2f}",
             )
         )
-        if x:
-            fig.add_annotation(
-                x=x[-1],
-                y=y[-1],
-                text=f"{y[-1]:+.1%}" if percent_y else f"{y[-1]:,.2f}",
-                showarrow=False,
-                xanchor="left",
-                xshift=6,
-                font=dict(color=p.ink, size=12),
-            )
+    # 끝점 값 라벨: 값이 가까우면 위아래로 벌려 겹치지 않게 한다
+    ends = sorted(
+        ((x[-1], y[-1]) for x, y in series.values() if x and y[-1] is not None),
+        key=lambda end: end[1],
+    )
+    values = [v for x, y in series.values() for v in y if v is not None]
+    span = (max(values) - min(values)) if values else 0.0
+    shifts, last = [], None
+    for _, value in ends:
+        close = last is not None and span > 0 and (value - last[0]) < span * 0.06
+        shifts.append(last[1] + 14 if close else 0)
+        last = (value, shifts[-1])
+    for (end_x, end_y), shift in zip(ends, shifts):
+        fig.add_annotation(
+            x=end_x,
+            y=end_y,
+            text=f"{end_y:+.1%}" if percent_y else f"{end_y:,.2f}",
+            showarrow=False,
+            xanchor="left",
+            xshift=6,
+            yshift=shift,
+            font=dict(color=p.ink, size=12),
+        )
     style(fig, height=height, percent_y=percent_y)
     fig.update_layout(margin=dict(r=56))
     return fig

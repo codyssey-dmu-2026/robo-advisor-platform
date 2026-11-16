@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -114,8 +114,66 @@ class PolicySchedule:
         return index
 
 
-def _build_schedule() -> PolicySchedule:
-    """모델과 데이터를 읽어 평가 구간 전체의 날짜별 목표 비중을 계산한다."""
+@dataclass(frozen=True)
+class Policy:
+    """학습된 모델과 rl-engine 평가 환경. 같은 환경으로 비중표·백테스트를 재생한다."""
+
+    model_name: str
+    tickers: List[str]
+    max_weight: float
+    model: Any  # predict(obs, deterministic=True) -> (action, state)
+    make_env: Callable[[], Any]  # rl-engine 테스트 환경 (reset·step·dates·current_step)
+    action_to_weights: Callable[[Any, float], np.ndarray]
+    weights_to_action: Callable[[np.ndarray], Any]
+
+
+def _naive(value) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    return stamp.tz_localize(None) if stamp.tzinfo else stamp
+
+
+def replay(
+    policy: Policy,
+    adjust: Optional[Callable[[pd.Timestamp, np.ndarray], np.ndarray]] = None,
+) -> tuple[pd.DatetimeIndex, np.ndarray, pd.DataFrame]:
+    """평가 구간을 하루씩 재생한다. (결정일, 목표 비중, 일별 성과)
+
+    adjust를 주면 모델 비중을 그 함수로 바꾼 뒤 체결한다. 바뀐 비중이 다음 날
+    관측(현재 보유 비중)에 들어가므로 Safe-Guard를 실제로 켠 것과 같은 폐루프 재생이다.
+    거래비용·체결 규칙은 rl-engine 환경 그대로다.
+    """
+    env = policy.make_env()
+    obs, _ = env.reset(seed=42)
+    dates, weights, rows = [], [], []
+    while True:
+        action, _ = policy.model.predict(obs, deterministic=True)
+        date = _naive(env.dates[env.current_step])
+        target = policy.action_to_weights(action, policy.max_weight)
+        if adjust is not None:
+            target = adjust(date, target)
+            action = policy.weights_to_action(target)
+        dates.append(date)
+        weights.append(target)
+        if env.current_step >= env.n_steps - 1:  # 마지막 날은 결정만 하고 끝
+            break
+        obs, _, _, _, info = env.step(action)
+        rows.append(
+            {
+                "date": _naive(env.dates[env.current_step]),
+                "net_return": float(info["net_return"]),
+                "turnover": float(info["turnover"]),
+            }
+        )
+    daily = pd.DataFrame(rows, columns=["date", "net_return", "turnover"])
+    return (
+        pd.DatetimeIndex(dates),
+        np.asarray(weights, dtype=float),
+        daily.set_index("date"),
+    )
+
+
+def _load_policy() -> Policy:
+    """모델과 데이터를 읽어 평가 환경을 준비한다."""
     source = RL_REPO_PATH / "src"
     if not source.is_dir():
         raise FileNotFoundError(f"rl-engine 코드를 찾을 수 없습니다: {source}")
@@ -126,7 +184,7 @@ def _build_schedule() -> PolicySchedule:
     from stable_baselines3 import PPO
 
     from data_loader import load_walk_forward_window
-    from environment import action_to_weights
+    from environment import action_to_weights, weights_to_action
     from model_meta import check_compatible, load_meta
     from rollout import build_test_env
 
@@ -141,23 +199,33 @@ def _build_schedule() -> PolicySchedule:
     env = build_test_env(data, meta["lookback"])
     check_compatible(meta, data, env)  # 자산 순서·입력 크기가 다르면 여기서 중단
     model = PPO.load(str(path), device="cpu")
-
-    dates, weights = [], []
-    obs, _ = env.reset(seed=42)
-    while True:
-        action, _ = model.predict(obs, deterministic=True)
-        dates.append(env.dates[env.current_step])
-        weights.append(action_to_weights(action, meta["max_weight"]))
-        if env.current_step >= env.n_steps - 1:  # 마지막 날은 결정만 하고 끝
-            break
-        obs, *_ = env.step(action)
-
-    return PolicySchedule(
+    return Policy(
         model_name=RL_MODEL_NAME,
         tickers=list(data.tickers),
-        dates=pd.DatetimeIndex(dates).tz_localize(None),
-        weights=np.asarray(weights, dtype=float),
         max_weight=float(meta["max_weight"]),
+        model=model,
+        make_env=lambda: build_test_env(data, meta["lookback"]),
+        action_to_weights=action_to_weights,
+        weights_to_action=weights_to_action,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_policy() -> Policy:
+    """최초 1회만 읽는다. 실패하면 저장하지 않으므로 다음 호출에서 다시 시도한다."""
+    return _load_policy()
+
+
+def _build_schedule() -> PolicySchedule:
+    """평가 구간 전체의 날짜별 목표 비중 (모델 비중 그대로 재생)."""
+    policy = get_policy()
+    dates, weights, _ = replay(policy)
+    return PolicySchedule(
+        model_name=policy.model_name,
+        tickers=policy.tickers,
+        dates=dates,
+        weights=weights,
+        max_weight=policy.max_weight,
     )
 
 
@@ -262,12 +330,17 @@ def _tag_records(live: pd.DataFrame) -> List[dict]:
     ]
 
 
+def _scores(live: pd.DataFrame, tickers: List[str]) -> np.ndarray:
+    """자산별 위험 점수: 유효한 태그 중 최대 (심각도 × 신뢰도)."""
+    best = live.groupby("asset_id")["score"].max()
+    return np.array([float(best.get(t, 0.0)) for t in tickers])
+
+
 def guard_decision(schedule: PolicySchedule, index: int, tags: pd.DataFrame) -> dict:
     """index번째 결정일의 Safe-Guard 결과: 조정된 비중, 근거 태그, 자산별 조정 내역."""
     raw = schedule.weights[index]
     live = _active_tags(tags, schedule.dates[index], schedule.tickers)
-    best = live.groupby("asset_id")["score"].max()
-    scores = np.array([float(best.get(t, 0.0)) for t in schedule.tickers])
+    scores = _scores(live, schedule.tickers)
     adjusted = apply_risk_tags(raw, scores, schedule.max_weight)
     adjustments = [
         {
@@ -343,7 +416,8 @@ def build_guard_summary(schedule: PolicySchedule, tags: pd.DataFrame) -> dict:
         "tags": sorted(seen.values(), key=lambda t: t["available_at"]),
         "limitation": (
             "서빙 단계에서 적용하는 규칙입니다. 모델은 리스크 태그 없이 학습됐고, "
-            "백테스트 성과에는 이 조정이 반영되지 않았습니다."
+            "강화학습 성과 화면의 백테스트 성과에는 이 조정이 반영되지 않았습니다. "
+            "끔/켬 비교는 리스크 모니터링 화면의 백테스트 비교에서 볼 수 있습니다."
         ),
         "disclaimer": DISCLAIMER,
     }
@@ -573,6 +647,112 @@ def get_performance() -> dict:
     return _build_performance()
 
 
+def _published_daily() -> Optional[pd.Series]:
+    """rl-engine이 공개한 현재 모델의 일별 수익률 (재생 결과 대조용). 없으면 None."""
+    try:
+        meta = json.loads(
+            (RL_MODELS_DIR / f"{RL_MODEL_NAME}.json").read_text(encoding="utf-8")
+        )
+        daily = pd.read_csv(RL_RESULTS_DIR / "eval_test_daily.csv", dtype={"seed": str})
+    except (OSError, ValueError, KeyError):
+        return None
+    mine = daily[
+        (daily.strategy == f"PPO-{meta.get('variant')}")
+        & (daily.seed == str(meta.get("seed")))
+        & (daily.window == meta.get("window"))
+    ]
+    if mine.empty:
+        return None
+    return mine.set_index(pd.to_datetime(mine["date"]))["net_return"]
+
+
+def build_guard_backtest(policy: Policy, tags: pd.DataFrame) -> dict:
+    """같은 모델·같은 환경으로 리스크 태그 Safe-Guard 끔/켬을 재생해 성과를 비교한다."""
+    moved: Dict[pd.Timestamp, float] = {}
+
+    def guarded(date: pd.Timestamp, weights: np.ndarray) -> np.ndarray:
+        live = _active_tags(tags, date, policy.tickers)
+        adjusted = apply_risk_tags(
+            weights, _scores(live, policy.tickers), policy.max_weight
+        )
+        cut = float(np.clip(weights - adjusted, 0.0, None).sum())
+        if cut > 1e-9:
+            moved[date] = cut
+        return adjusted
+
+    _, _, off = replay(policy)
+    _, _, on = replay(policy, adjust=guarded)
+
+    def metrics(frame: pd.DataFrame) -> dict:
+        result = _series_metrics(frame["net_return"])
+        for key in ("alpha", "beta", "information_ratio"):  # 벤치마크 비교 지표는 제외
+            result.pop(key)
+        result["avg_turnover"] = _clean(frame["turnover"].mean())
+        return result
+
+    model, guard = metrics(off), metrics(on)
+    series = {"dates": [str(d.date()) for d in off.index]}
+    for key, frame in (("model", off), ("guarded", on)):
+        value, drawdown = _value_curve(frame["net_return"])
+        series[key] = {
+            "cumulative_return": np.round(value - 1.0, 6).tolist(),
+            "drawdown": np.round(drawdown, 6).tolist(),
+        }
+
+    # 끈 쪽 재생이 rl-engine 공개 결과와 같은지 (같은 모델·데이터인지 확인)
+    published = _published_daily()
+    check = None
+    if published is not None:
+        common = off.index.intersection(published.index)
+        check = {
+            "matched_days": int(len(common)),
+            "max_abs_diff": _clean(
+                (off.loc[common, "net_return"] - published.loc[common]).abs().max()
+            ),
+        }
+
+    return {
+        "status": "ok",
+        "model_name": policy.model_name,
+        "period": {"start": series["dates"][0], "end": series["dates"][-1]},
+        "trading_days": len(off),
+        "method": (
+            "폐루프 재생: Safe-Guard로 바꾼 비중으로 체결하고, 그 비중이 다음 날 "
+            "모델 입력(현재 보유 비중)에 들어간다. 거래비용·체결은 rl-engine 환경과 동일"
+        ),
+        "rule": {
+            "score": "유효한 태그 중 최대 (심각도 × 신뢰도)",
+            "threshold": RISK_TAG_THRESHOLD,
+            "max_cut": RISK_TAG_MAX_CUT,
+            "max_weight": policy.max_weight,
+        },
+        "adjusted_days": len(moved),
+        "average_moved": _clean(np.mean(list(moved.values()))) if moved else 0.0,
+        "metrics": {"model": model, "guarded": guard},
+        "difference": {
+            key: (
+                None
+                if model[key] is None or guard[key] is None
+                else _clean(guard[key] - model[key])
+            )
+            for key in model
+        },
+        "series": series,
+        "reproduces_published": check,
+        "limitation": (
+            "평가 구간 1년(현재 모델의 테스트 연도)만 비교한 결과입니다. 규칙의 기준값은 "
+            "이 구간을 보고 고르지 않았지만, 한 구간 결과로 일반화할 수 없습니다."
+        ),
+        "disclaimer": DISCLAIMER,
+    }
+
+
+@lru_cache(maxsize=1)
+def get_guard_backtest() -> dict:
+    """모델·태그가 바뀌지 않으므로 한 번만 계산한다 (재생 2회, 수 초)."""
+    return build_guard_backtest(get_policy(), get_risk_tags())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # 첫 요청이 5초 제한을 넘지 않도록 시작할 때 미리 계산한다
@@ -585,6 +765,14 @@ async def lifespan(_: FastAPI):
         logger.info("리스크 태그 %d건 로드", len(get_risk_tags()))
     except Exception as error:
         logger.warning("리스크 태그 없음: Safe-Guard 없이 모델 비중만 응답 (%s)", error)
+    try:
+        result = get_guard_backtest()
+        logger.info(
+            "Safe-Guard 켬/끔 백테스트 완료 (공개 결과 대조: %s)",
+            result["reproduces_published"],
+        )
+    except Exception as error:
+        logger.warning("Safe-Guard 켬/끔 백테스트를 계산하지 못함 (%s)", error)
     yield
 
 
@@ -757,3 +945,16 @@ def risk_tags():
     if tags is None:
         raise HTTPException(503, reason)
     return get_guard_summary(schedule, tags)
+
+
+@app.get("/risk-tags/backtest")
+def risk_tags_backtest():
+    """리스크 태그 Safe-Guard를 끈 경우와 켠 경우의 평가 구간 성과 비교."""
+    try:
+        get_policy()
+    except Exception as error:
+        raise HTTPException(503, f"모델을 사용할 수 없습니다: {error}") from error
+    tags, reason = _load_tags()
+    if tags is None:
+        raise HTTPException(503, reason)
+    return get_guard_backtest()

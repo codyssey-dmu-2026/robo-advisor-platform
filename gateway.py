@@ -170,6 +170,23 @@ class RiskTagsResponse(PassThrough):
     disclaimer: str
 
 
+class GuardBacktestResponse(PassThrough):
+    model_name: str
+    period: Dict[str, str] = Field(description="비교 구간 (현재 모델의 테스트 연도)")
+    method: str = Field(description="재생 방식 (폐루프)")
+    adjusted_days: int = Field(description="Safe-Guard가 비중을 줄인 결정일 수")
+    metrics: Dict[str, Dict[str, Any]] = Field(
+        description="model(끔)·guarded(켬) 각각의 성과 지표"
+    )
+    difference: Dict[str, Any] = Field(description="켬 − 끔")
+    series: Dict[str, Any] = Field(description="일별 누적 수익률·낙폭")
+    reproduces_published: Optional[Dict[str, Any]] = Field(
+        default=None, description="끈 쪽 재생과 rl-engine 공개 결과의 대조"
+    )
+    limitation: str
+    disclaimer: str
+
+
 class ExplainResponse(PassThrough):
     run_id: str
     decision_id: str
@@ -392,6 +409,22 @@ async def risk_tag_guard():
     return await _forward(
         "GET",
         f"{RL_API_URL}/risk-tags",
+        "RL Engine(8002)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
+
+
+@app.get(
+    "/risk-tags/backtest",
+    summary="(보조) 리스크 태그 Safe-Guard 끔/켬 백테스트 비교",
+    response_model=GuardBacktestResponse,
+    response_model_exclude_unset=True,
+)
+async def risk_tag_guard_backtest():
+    """같은 모델·같은 환경으로 Safe-Guard를 끈 경우와 켠 경우의 평가 구간 성과."""
+    return await _forward(
+        "GET",
+        f"{RL_API_URL}/risk-tags/backtest",
         "RL Engine(8002)",
         timeout=UPSTREAM_TIMEOUT_S,
     )
