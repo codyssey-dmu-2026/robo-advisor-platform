@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Path as PathParam
+from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -17,6 +17,8 @@ app = FastAPI(
 )
 
 EVAL_API_URL = os.getenv("EVAL_API_URL", "http://127.0.0.1:8000")
+# SHAP 설명 전용 evaluation-xai 인스턴스 (성과 산출물과 설명 산출물이 다른 폴더라 따로 띄움)
+EVAL_EXPLAIN_API_URL = os.getenv("EVAL_EXPLAIN_API_URL", EVAL_API_URL)
 AGENT_API_URL = os.getenv("AGENT_API_URL", "http://127.0.0.1:8001")
 RL_API_URL = os.getenv("RL_API_URL", "http://127.0.0.1:8002")
 
@@ -73,6 +75,10 @@ class ExplainRequest(BaseModel):
     )
     target_asset: str = Field(
         ..., pattern=r"^[A-Za-z0-9_.-]{1,30}$", description="대상 자산 티커"
+    )
+    allow_synthetic: bool = Field(
+        default=False,
+        description="합성 데이터 데모 설명도 받을지 여부 (기본 false면 데모는 409)",
     )
 
 
@@ -169,6 +175,11 @@ class ExplainResponse(PassThrough):
     decision_id: str
     target_asset: str
     data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    explanation_scope: Optional[str] = Field(
+        default=None,
+        description="policy_attribution(실제 정책 설명) / "
+        "synthetic_demonstration_not_trading_decision(합성 데모)",
+    )
     method: Optional[str] = None
     base_value: Optional[float] = None
     predicted_weight: Optional[float] = None
@@ -178,6 +189,17 @@ class ExplainResponse(PassThrough):
     )
     interpretation: Optional[str] = None
     disclaimer: Optional[str] = None
+
+
+class ExplainCatalogResponse(BaseModel):
+    data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    explanations: Dict[str, List[str]] = Field(
+        description="'run_id/decision_id' → 설명 가능한 자산 목록"
+    )
+    plots: List[str] = Field(
+        description="Summary·Force Plot이 있는 'run_id/decision_id/자산' 목록"
+    )
+    disclaimer: str
 
 
 class ResearchResponse(PassThrough):
@@ -194,7 +216,9 @@ class ResearchResponse(PassThrough):
 
 
 class BacktestResponse(PassThrough):
-    data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    data_mode: Optional[str] = Field(
+        default=None, description="synthetic / imported_unverified / real"
+    )
     runs: Dict[str, Dict[str, Any]] = Field(description="실행별 12개 지표")
     mission_anova: Optional[Any] = Field(default=None, description="ANOVA 검증 결과")
     bootstrap: Optional[Any] = None
@@ -234,13 +258,19 @@ class TimeseriesResponse(BaseModel):
     disclaimer: str
 
 
-async def _forward(
-    method: str, url: str, service: str, *, timeout: float, json: Any = None
-) -> Any:
+async def _fetch(
+    method: str,
+    url: str,
+    service: str,
+    *,
+    timeout: float,
+    json: Any = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> httpx.Response:
     """하위 서비스 호출. 시간 초과는 504, 연결 실패는 503, 오류 응답은 상태 코드 그대로."""
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            r = await client.request(method, url, json=json)
+            r = await client.request(method, url, json=json, params=params)
         except httpx.TimeoutException as e:
             raise HTTPException(
                 status_code=504,
@@ -258,6 +288,13 @@ async def _forward(
         except ValueError:
             detail = r.text[:200]
         raise HTTPException(status_code=r.status_code, detail=detail)
+    return r
+
+
+async def _forward(
+    method: str, url: str, service: str, *, timeout: float, json: Any = None
+) -> Any:
+    r = await _fetch(method, url, service, timeout=timeout, json=json)
     return r.json()
 
 
@@ -370,11 +407,71 @@ async def risk_tag_guard():
 async def explain_decision(req: ExplainRequest):
     return await _forward(
         "POST",
-        f"{EVAL_API_URL}/explain",
+        f"{EVAL_EXPLAIN_API_URL}/explain",
         "Evaluation API(8000)",
         timeout=UPSTREAM_TIMEOUT_S,
         json=req.model_dump(),
     )
+
+
+# 3-1. GET /explain/catalog : 설명을 조회할 수 있는 실행·의사결정·자산 목록 (보조 API)
+@app.get(
+    "/explain/catalog",
+    summary="3-1. SHAP 설명이 계산된 실행·의사결정·자산 목록",
+    response_model=ExplainCatalogResponse,
+)
+async def explain_catalog():
+    bundle = await _forward(
+        "GET",
+        f"{EVAL_EXPLAIN_API_URL}/backtest",
+        "Evaluation API(8000)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
+    explanations = bundle.get("explanations") or {}
+    return {
+        "data_mode": bundle.get("data_mode"),
+        "explanations": {
+            key: list(item.get("asset_names", []))
+            for key, item in sorted(explanations.items())
+        },
+        "plots": sorted(bundle.get("plot_artifacts") or {}),
+        "disclaimer": DISCLAIMER,
+    }
+
+
+# 3-2. GET /explain/plots/... : Summary Plot(PNG)·Force Plot(HTML) 전달 (보조 API)
+_PLOT_TYPES = {"summary": "image/png", "force": "text/html; charset=utf-8"}
+_ID = r"^[A-Za-z0-9_-]{1,80}$"
+
+
+@app.get(
+    "/explain/plots/{run_id}/{decision_id}/{target_asset}/{kind}",
+    summary="3-2. SHAP Summary Plot(PNG) 또는 Force Plot(HTML)",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}, "text/html": {}}}},
+)
+async def explain_plot(
+    run_id: str = PathParam(..., pattern=_ID),
+    decision_id: str = PathParam(..., pattern=_ID),
+    target_asset: str = PathParam(..., pattern=r"^[A-Za-z0-9_.-]{1,30}$"),
+    kind: str = PathParam(..., pattern="^(summary|force)$"),
+    allow_synthetic: bool = Query(default=False, description="합성 데모 그림 허용"),
+):
+    r = await _fetch(
+        "GET",
+        f"{EVAL_EXPLAIN_API_URL}/explanations/{run_id}/{decision_id}/"
+        f"{target_asset}/plots/{kind}",
+        "Evaluation API(8000)",
+        timeout=UPSTREAM_TIMEOUT_S,
+        params={"allow_synthetic": str(allow_synthetic).lower()},
+    )
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if kind == "force":
+        # 그림 HTML 안의 스크립트가 Gateway 출처 권한을 갖지 않도록 하위 서비스와 같은 격리 정책 유지
+        headers["Content-Security-Policy"] = r.headers.get(
+            "Content-Security-Policy", "sandbox allow-scripts"
+        )
+    return Response(content=r.content, media_type=_PLOT_TYPES[kind], headers=headers)
 
 
 # 4. POST /research : 투자 질문에 대한 에이전틱 리서치 결과 반환

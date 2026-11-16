@@ -25,6 +25,12 @@ class ApiError(Exception):
 
 
 def _request(method: str, path: str, *, timeout: float = TIMEOUT_S, **kwargs) -> Any:
+    return _send(method, path, timeout=timeout, **kwargs).json()
+
+
+def _send(
+    method: str, path: str, *, timeout: float = TIMEOUT_S, **kwargs
+) -> requests.Response:
     try:
         response = requests.request(
             method, f"{GATEWAY_URL}{path}", timeout=timeout, **kwargs
@@ -50,7 +56,7 @@ def _request(method: str, path: str, *, timeout: float = TIMEOUT_S, **kwargs) ->
             status=response.status_code,
             hint=str(detail),
         )
-    return response.json()
+    return response
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -74,14 +80,37 @@ def timeseries(run_id: str) -> dict:
     return _request("GET", f"/backtest/{run_id}/timeseries")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def explain_catalog() -> dict:
+    """SHAP 설명이 계산된 실행·의사결정·자산 목록과 그림이 있는 항목."""
+    return _request("GET", "/explain/catalog")
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def explain(run_id: str, decision_id: str, target_asset: str) -> dict:
+def explain(
+    run_id: str, decision_id: str, target_asset: str, allow_synthetic: bool = False
+) -> dict:
     payload = {
         "run_id": run_id,
         "decision_id": decision_id,
         "target_asset": target_asset,
+        "allow_synthetic": allow_synthetic,
     }
     return _request("POST", "/explain", json=payload)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def explain_plot(
+    run_id: str,
+    decision_id: str,
+    target_asset: str,
+    kind: str,
+    allow_synthetic: bool = False,
+) -> bytes:
+    """Summary Plot(PNG 바이트) 또는 Force Plot(HTML 바이트)."""
+    path = f"/explain/plots/{run_id}/{decision_id}/{target_asset}/{kind}"
+    params = {"allow_synthetic": str(allow_synthetic).lower()}
+    return _send("GET", path, params=params).content
 
 
 @st.cache_data(ttl=30, show_spinner=False)

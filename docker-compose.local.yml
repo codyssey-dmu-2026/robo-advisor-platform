@@ -19,6 +19,9 @@ services:
   eval-bootstrap:
     build:
       context: ../evaluation-xai
+    # GitHub에서 내려받는 대신 rl-engine 로컬 사본의 결과 CSV를 분석
+    volumes:
+      - ../rl-engine/models:/rl-engine-models:ro
 
   evaluation-xai:
     build:

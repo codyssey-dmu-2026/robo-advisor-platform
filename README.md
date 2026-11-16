@@ -52,6 +52,7 @@
     │   ├── test_api.py      # 5대 엔드포인트 규격, RL 서빙 규칙, 422 방어, 5초 SLA 검증
     │   ├── test_performance.py  # 실제 백테스트 성과 API 검증
     │   ├── test_risk_guard.py  # 리스크 태그 Safe-Guard 규칙·누수 방지·태그 없음 검증
+    │   ├── test_explain.py  # SHAP 설명 경로: 설명 전용 인스턴스·합성 데모 허용·그림 프록시
     │   ├── test_dashboard.py  # 시계열 API, 실데이터·오프라인 페이지 렌더링 검증
     │   └── conftest.py      # 테스트용 백테스트 결과 CSV·리스크 태그 준비
     ├── scripts/
@@ -81,9 +82,11 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속 (요청
 |---|---|---|---|
 | `GET` | `/health` | 전체 게이트웨이 및 하위 3개 서비스 상태/모델 로드 여부 반환 | `8000`, `8001`, `8002` |
 | `POST` | `/optimize` | 12개 자산 유니버스 기반 최적 포트폴리오 비중(합=1.0) 반환. `risk_override`(기본 true)면 리스크 태그 Safe-Guard를 적용하고 조정 내역(`risk_guard`)과 모델 원래 비중(`model_weights`)을 함께 반환 | `rl-engine (8002)` |
-| `POST` | `/explain` | 특정 의사결정(`run_id`, `decision_id`, `target_asset`) SHAP 기여도 반환 | `evaluation-xai (8000)` |
+| `POST` | `/explain` | 특정 의사결정(`run_id`, `decision_id`, `target_asset`) SHAP 기여도 반환. 합성 데모 설명은 `allow_synthetic: true`일 때만 반환(아니면 409) | `evaluation-xai` 설명 전용 인스턴스 |
 | `POST` | `/research` | 투자 질문에 대한 LangGraph 리서치 요약, 추론 로그, 출처, RiskTag 반환. `tickers`·`as_of`를 생략하면 에이전트가 질문에서 종목을 인식하고 요청 시각을 기준으로 함 | `agentic-research (8001)` |
 | `GET` | `/backtest` | Walk-Forward 백테스트 12개 성과 지표 및 ANOVA/Bootstrap 통계 결과 반환 | `evaluation-xai (8000)` |
+| `GET` | `/explain/catalog` | (보조) SHAP 설명이 계산된 실행·의사결정·자산 목록과 그림이 있는 항목 | `evaluation-xai` 설명 전용 인스턴스 |
+| `GET` | `/explain/plots/{run_id}/{decision_id}/{asset}/{summary\|force}` | (보조) SHAP Summary Plot(PNG)·Force Plot(HTML, 스크립트 격리 정책 유지) | `evaluation-xai` 설명 전용 인스턴스 |
 | `GET` | `/backtest/{run_id}/timeseries` | (보조) 일별 누적 수익률·낙폭·비중 시계열. 대시보드 차트용 | `evaluation-xai` 산출물 읽기 전용 |
 | `GET` | `/performance` | (보조) 현재 RL 모델의 Walk-Forward 실제 성과: 12개 지표, 동일가중·SPY·보상 함수 5종 비교, 4년 연결 시계열, Safe-Guard 한도 초과 구간 | `rl-engine (8002)` |
 | `GET` | `/risk-tags` | (보조) 리스크 태그 Safe-Guard가 현재 모델의 평가 구간에서 작동한 내역: 발동일, 자산별 축소 비중, 근거 태그와 출처 | `rl-engine (8002)` |
@@ -119,12 +122,12 @@ Swagger UI 문서: 서버 실행 후 `http://127.0.0.1:8080/docs` 접속 (요청
 0. **개요:** 현재 모델의 4년 KPI(누적 수익률·샤프·MDD·VaR, 동일가중 대비 차이), 현재 모델·동일가중·SPY 누적 수익률, 자산군 비중
 1. **포트폴리오 현황 (`POST /optimize`, `GET /performance`):** 실제 PPO 모델의 기준일별 종목 비중, 자산군 도넛, 리스크 태그 Safe-Guard 조정 내역(조정 전후 비중·근거 태그·발동일 바로가기·반영 토글), 기준일 낙폭 기반 MDD Safe-Guard 상태, 4년 연결 누적 수익률, 비중 변화
 2. **강화학습 성과 (`GET /performance`):** 과제 성능 기준 점검(SPY·동일가중 대비 샤프 +0.2, 누적 +10%p), 보상 함수 5종·벤치마크 연도별 비교, 12개 지표 전체 표, 학습 곡선(rl-engine 학습 기록 공유 대기)
-3. **SHAP 해석 (`POST /explain`):** 기준 비중 → 피처 그룹별 기여 → 예측 비중 폭포 차트, 해석 문장
+3. **SHAP 해석 (`GET /explain/catalog`, `POST /explain`, `GET /explain/plots/...`):** 기준 비중 → 피처 그룹별 기여 → 예측 비중 폭포 차트, 해석 문장, Summary Plot·Force Plot
 4. **에이전트 리서치 (`POST /research`):** 예시 질문, 투자의견 배지·신뢰도, 단계별 추론 과정(Reasoning Trace), 인용 번호가 달린 주장, 원문 링크, 리스크 태그
-5. **ANOVA 검증 결과 (`GET /backtest`):** 과제 3대 검증 상태, 효과 검정(F·p·η²)과 유의성, 가정 진단, 블록 부트스트랩 신뢰구간
+5. **ANOVA 검증 결과 (`GET /backtest`):** 과제 3대 검증 상태, 완료된 검증의 효과 검정(F·p·η²·효과 크기 등급)과 비유의 시 해석, 가정 진단, 사후 검정 여부, 블록 부트스트랩 신뢰구간
 6. **리스크 모니터링 (`GET /performance`, `GET /risk-tags`):** 4년 전체·연도별 VaR·CVaR·MDD 게이지, 낙폭(Underwater) 차트와 -15% 한도선, Safe-Guard 한도 초과 구간 기록 및 상태 알림, 리스크 태그 Safe-Guard 발동 현황(발동일별 축소 비중, 자산별 발동일 수, 근거 태그와 출처)
 
-SHAP·ANOVA 페이지는 evaluation-xai 결과를 사용하며, 실데이터 평가 전까지 `DEMO` 배지로 표시됩니다.
+ANOVA 페이지는 evaluation-xai가 rl-engine의 실제 Walk-Forward 결과를 분석한 값(`실데이터 · 잠정` 배지)을 보여 줍니다. SHAP 페이지는 실제 PPO SHAP 산출물이 공유되기 전까지 evaluation-xai의 합성 데모(`DEMO` 배지)를 보여 줍니다.
 
 ---
 
@@ -162,7 +165,9 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 |---|---|---|
 | 1 | `data-bootstrap` | data-pipeline: 가격 수집(yfinance/pykrx) → 전처리 → 뉴스·공시 수집(SEC, 한국경제 RSS, DART는 키 있을 때) |
 | 2 | `agent-bootstrap` | agentic-research: 뉴스 → ChromaDB 적재, RiskTag 생성 (RL 서빙 서버가 `agent-artifacts` 볼륨을 읽기 전용으로 연결해 사용) |
-| 3 | `eval-bootstrap` | evaluation-xai: 평가 산출물 생성 (현재 synthetic 데모) |
+| 3 | `eval-bootstrap` | evaluation-xai: rl-engine 고정 커밋의 공개 결과 CSV를 받아 실제 성과 분석(`team-results`: 12개 지표·ANOVA 검증 1·블록 부트스트랩)과 SHAP 데모(`demo`)를 생성. 평가 코드 커밋이 바뀌면 자동 재생성 |
+
+평가 API(`evaluation-xai`)는 산출물 폴더를 하나만 읽으므로 같은 이미지를 두 번 띄웁니다. `evaluation-xai`(8000)는 성과·ANOVA(`team-results`), 내부 전용 `evaluation-xai-explain`은 SHAP 설명(`demo`)을 제공하고, 실제 PPO SHAP 산출물이 공유되면 `.env`의 `EVAL_EXPLAIN_ARTIFACT_DIR`만 바꾸면 됩니다.
 
 - 뉴스 데이터는 재배포 금지라 git에 올리지 않고 실행 환경마다 직접 수집합니다.
 - 다시 수집하려면 `.env`에 `BOOTSTRAP_FORCE=1`, 완전 초기화는 `docker compose down -v`.
@@ -189,7 +194,8 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 기준일 미래 정보 차단,
 RL 장애 시 대체 응답, 실제 성과 API(4년 연결·시드 평균·벤치마크 지표·Safe-Guard 구간), 시계열 API,
 리스크 태그 Safe-Guard(축소 규칙·상한 유지·미래 태그 차단·만료·태그 파일 없음),
-실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 70개의 테스트를 포함합니다. 하위 서비스는 가짜 응답으로 대체해 정상 전달·422·503·504를 각각 확인합니다.
+SHAP 설명 경로(설명 전용 인스턴스·합성 데모 허용·그림 프록시), ANOVA·SHAP 화면,
+실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 79개의 테스트를 포함합니다. 하위 서비스는 가짜 응답으로 대체해 정상 전달·422·503·504를 각각 확인합니다.
 (CI에는 torch가 없으므로 RL 서버 테스트는 가짜 비중 표를 넣어 API 규칙을 검증합니다.)
 push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 
