@@ -455,9 +455,20 @@ def forest(
             hovertemplate="%{y}<br>평균 차이 %{x:.3%}<extra></extra>",
         )
     )
-    fig.add_vline(x=0, line=dict(color=p.axis, width=1))
+    # 구간이 0을 포함하는지가 핵심이므로 0이 항상 축 안쪽에 보이도록 범위를 잡는다
+    lo, hi = min(0.0, *lows), max(0.0, *highs)
+    pad = (hi - lo) * 0.12 or 0.001
+    fig.add_vline(
+        x=0,
+        line=dict(color=p.axis, width=1, dash="dot"),
+        annotation_text="0 (차이 없음)",
+        annotation_position="top",
+        annotation_font=dict(size=11, color=p.muted),
+    )
     style(fig, height=height, hover="closest")
-    fig.update_xaxes(tickformat=".2%", showgrid=True, gridcolor=p.grid)
+    fig.update_xaxes(
+        tickformat=".2%", showgrid=True, gridcolor=p.grid, range=[lo - pad, hi + pad]
+    )
     fig.update_yaxes(gridcolor="rgba(0,0,0,0)")
     fig.update_layout(showlegend=False)
     return fig

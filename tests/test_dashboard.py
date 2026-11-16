@@ -70,12 +70,73 @@ def test_16_timeseries_unknown_and_invalid_run(artifact_dir):
 
 
 class _Response:
-    def __init__(self, payload: dict):
+    def __init__(self, payload):
         self.status_code = 200
         self._payload = payload
+        # 그림(PNG·HTML) 응답은 바이트로 받는다
+        self.content = payload if isinstance(payload, bytes) else b""
 
     def json(self) -> dict:
         return self._payload
+
+
+# evaluation-xai import-rl 산출물과 같은 구조 (값은 실제 분석 결과)
+IMPORTED_BACKTEST = {
+    "data_mode": "imported_unverified",
+    "status": "provisional",
+    "runs": {"EqualWeight_w1": {"strategy": "EqualWeight", "metrics": {}}},
+    "explanations": {},
+    "mission_anova": {
+        "reward_variants": {
+            "status": "complete",
+            "effects": [
+                {
+                    "term": "C(strategy)",
+                    "f": 0.19656,
+                    "p_value": 0.82178,
+                    "eta_squared": 0.00278,
+                }
+            ],
+            "diagnostics": {"levene_p": 0.6056, "shapiro_residual_p": 0.0741},
+            "tukey_status": "not_required",
+            "representative_mdd_lambda": 1.0,
+        },
+        "strategies": {"status": "incomplete", "reason": "MVO missing"},
+        "strategy_by_regime": {"status": "incomplete", "reason": "MVO missing"},
+    },
+    "bootstrap": [
+        {
+            "mean_monthly_difference": -0.00365,
+            "ci_95": [-0.00519, -0.00188],
+            "block_length": n,
+            "repetitions": 5000,
+            "comparison": "PPO-mdd_l1.0_seed_mean_minus_EqualWeight_daily",
+        }
+        for n in (1, 3, 6)
+    ],
+    "limitations": ["Imported producer-declared real results."],
+}
+SHAP_EXPLAIN = {
+    "data_mode": "synthetic",
+    "run_id": "toy_policy",
+    "decision_id": "toy0",
+    "target_asset": "SYN00",
+    "groups": ["returns", "indicators", "risk_inputs"],
+    "base_value": 0.1,
+    "predicted_weight": 0.15,
+    "contributions": [0.03, 0.01, 0.01],
+}
+PLOTS = "/explain/plots/toy_policy/toy0/SYN00"
+
+
+def _png() -> bytes:
+    """1×1 PNG (st.image가 읽을 수 있는 최소 이미지)."""
+    import base64
+
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGA"
+        "WjR9awAAAABJRU5ErkJggg=="
+    )
 
 
 @pytest.fixture
@@ -116,6 +177,16 @@ def online_gateway(perf_results, write_tags, monkeypatch):
     decision = rl_server.guard_decision(schedule, 2, tags)
     responses = {
         "/performance": perf,
+        "/backtest": IMPORTED_BACKTEST,
+        "/explain/catalog": {
+            "data_mode": "synthetic",
+            "explanations": {"toy_policy/toy0": ["SYN00"]},
+            "plots": ["toy_policy/toy0/SYN00"],
+            "disclaimer": "교육 목적",
+        },
+        "/explain": SHAP_EXPLAIN,
+        f"{PLOTS}/summary": _png(),
+        f"{PLOTS}/force": b"<html><body>force plot</body></html>",
         "/risk-tags": rl_server.build_guard_summary(schedule, tags),
         "/health": {
             "gateway": "ok",
@@ -149,11 +220,14 @@ def online_gateway(perf_results, write_tags, monkeypatch):
         path = url.removeprefix(os.environ["GATEWAY_URL"])
         if path not in responses:
             raise requests.exceptions.ConnectionError(path)
+        sent.append((path, kwargs))
         return _Response(responses[path])
+
+    sent = []
 
     monkeypatch.setattr(requests, "request", fake_request)
     st.cache_data.clear()
-    yield
+    yield sent
     st.cache_data.clear()
 
 
@@ -209,6 +283,35 @@ def test_20_risk_page_shows_risk_tag_guard_summary(online_gateway):
     days = next(m for m in at.metric if m.label == "발동일")
     assert days.value == "2일"
     assert any("백테스트 성과에는" in c.value for c in at.caption)
+
+
+def test_21_anova_page_shows_real_reward_test(online_gateway):
+    """21. ANOVA 화면이 실제 분석의 검증 1 수치·비유의 해석·부트스트랩을 보여 주고 나머지는 대기로 두는지 검증"""
+    at = _page("views/anova.py")
+    texts = [m.value for m in at.markdown]
+    assert any("실데이터 · 잠정" in t for t in texts)
+    assert any("F = 0.197" in c.value for c in at.caption)
+    assert any("MVO 결과가 필요" in c.value for c in at.caption)
+    assert any("우연 범위를 벗어나지 않습니다" in i.value for i in at.info)
+    effects = next(d.value for d in at.dataframe if "효과 크기 η²" in d.value.columns)
+    assert effects["요인"].iloc[0] == "보상 함수"
+    assert effects["효과 크기"].iloc[0] == "거의 없음"
+    assert any("신뢰구간 전체가 0보다 작습니다" in c.value for c in at.caption)
+
+
+def test_22_shap_page_requests_demo_with_opt_in_and_shows_plots(online_gateway):
+    """22. SHAP 화면이 데모 설명을 명시적으로 허용해 요청하고 Summary·Force Plot을 그리는지 검증"""
+    at = _page("views/shap.py")
+    texts = [m.value for m in at.markdown]
+    assert any("DEMO" in t for t in texts)
+    assert any("합성 데이터 데모" in i.value for i in at.info)
+    explain = next(kw for path, kw in online_gateway if path == "/explain")
+    assert explain["json"]["allow_synthetic"] is True
+    plots = [kw for path, kw in online_gateway if path.startswith(PLOTS)]
+    assert len(plots) == 2
+    assert all(kw["params"]["allow_synthetic"] == "true" for kw in plots)
+    assert any("Summary Plot" in t for t in texts)
+    assert at.metric[1].value == "15.00%"
 
 
 @pytest.mark.parametrize("page", [None, *PAGES])

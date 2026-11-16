@@ -148,6 +148,14 @@ def page_header(title: str, subtitle: str, *, data_mode: str | None = None) -> N
                 )
             elif data_mode == "real":
                 st.badge("실데이터", icon=":material/verified:", color="green")
+            elif data_mode == "imported_unverified":
+                st.badge(
+                    "실데이터 · 잠정",
+                    icon=":material/pending_actions:",
+                    color="blue",
+                    help="rl-engine의 실제 Walk-Forward 결과를 evaluation-xai가 분석한 잠정 결과입니다. "
+                    "원자료 재실행·MVO 비교 등 최종 검증은 남아 있습니다.",
+                )
 
 
 def load(fn: Callable[..., Any], *args, spinner: str = "불러오는 중…") -> Any | None:
