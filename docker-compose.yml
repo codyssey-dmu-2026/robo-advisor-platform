@@ -6,7 +6,7 @@
 # - 로컬 형제 폴더(../)의 작업 중 코드로 빌드하려면 docker-compose.local.yml을 함께 사용
 #
 # 팀원 레포 커밋 고정값 (갱신 시 아래 build.context의 #<sha>를 함께 변경)
-#   agentic-research  c395f1a / evaluation-xai a5506cd / data-pipeline 0bbd15f
+#   agentic-research  c395f1a / evaluation-xai a4b96f4 / data-pipeline 0bbd15f
 #   rl-engine 05579d2 와 모델 번들(Release models-v1)은 Dockerfile.rl에서 고정
 #   (eval-bootstrap의 EVAL_COMMIT·RL_ENGINE_COMMIT도 같은 값으로 맞춘다)
 
@@ -101,7 +101,7 @@ services:
   # ---------------------------------------------------------------
   eval-bootstrap:
     build: &eval-build
-      context: https://github.com/codyssey-dmu-2026/evaluation-xai.git#a5506cdd5bfff701251db60ecae449f4110d8283
+      context: https://github.com/codyssey-dmu-2026/evaluation-xai.git#a4b96f4e80726dd084caa2e5d1e9afa524af8eb5
       dockerfile: Dockerfile
     image: robo-evaluation-xai:local
     container_name: robo-eval-bootstrap
@@ -109,29 +109,59 @@ services:
       BOOTSTRAP_FORCE: ${BOOTSTRAP_FORCE:-0}
       MPLCONFIGDIR: /tmp/matplotlib
       # 평가 코드 커밋이 바뀌면 산출물을 다시 만든다 (위 build.context의 커밋과 같은 값)
-      EVAL_COMMIT: a5506cdd5bfff701251db60ecae449f4110d8283
-      # rl-engine 공개 결과(일별 CSV·모델 메타)를 받아 올 커밋 (Dockerfile.rl과 같은 값)
+      EVAL_COMMIT: a4b96f4e80726dd084caa2e5d1e9afa524af8eb5
+      # evaluation-xai compare-rl 결과 (재왕 님 실행: ANOVA 3종·MVO·실제 PPO SHAP 포함).
+      # git에 없는 산출물이라 platform Release에 두고 지문(sha256)을 검사한다
+      EVAL_RESULTS_URL: https://github.com/codyssey-dmu-2026/robo-advisor-platform/releases/download/eval-results-v1/evaluation-xai-rl-comparison-20261123-mac-all60.tar.gz
+      EVAL_RESULTS_SHA256: cf37d7b01ff97316a46cf036e2adde83454ec55bf211d33c3b94f705970a727b
+      # 위 결과를 받지 못할 때 대체 분석에 쓸 rl-engine 공개 결과 커밋 (Dockerfile.rl과 같은 값)
       RL_ENGINE_COMMIT: 05579d2c845e959fd7948f8cd5a826ca0a3b0599
-    # 산출물 2종
-    #   team-results: rl-engine 실제 Walk-Forward 결과를 evaluation-xai가 분석 (12개 지표, ANOVA 검증 1, 부트스트랩)
-    #   demo: 합성 데이터 SHAP 데모 (실제 PPO SHAP 산출물이 공유되기 전까지 SHAP 화면용)
+    # 산출물 2종 (평가 서비스 두 개가 항상 이 두 폴더를 읽는다)
+    #   results: 성과 지표·ANOVA (/backtest). 기본은 compare-rl 결과, 받지 못하면 import-rl 분석으로 대체
+    #   explain: SHAP 설명·그림 (/explain). 기본은 compare-rl 결과에 연결된 실제 SHAP, 대체 시 합성 데모
     command:
       - sh
       - -c
       - |
         set -e
         A=/app/artifacts
-        if [ "$$BOOTSTRAP_FORCE" != "1" ] && [ -f $$A/team-results/evaluation.json ] \
-           && [ -f $$A/demo/evaluation.json ] && [ "$$(cat $$A/.eval-commit 2>/dev/null)" = "$$EVAL_COMMIT" ]; then
+        STAMP="$$EVAL_COMMIT $$EVAL_RESULTS_SHA256"
+        if [ "$$BOOTSTRAP_FORCE" != "1" ] && [ -f $$A/results/evaluation.json ] \
+           && [ -f $$A/explain/evaluation.json ] && [ "$$(cat $$A/.eval-commit 2>/dev/null)" = "$$STAMP" ]; then
           echo "[eval-bootstrap] 기존 평가 산출물 사용 (재생성: BOOTSTRAP_FORCE=1)"
           exit 0
         fi
-        rm -rf $$A/team-results $$A/demo /tmp/rl
-        if [ -f /rl-engine-models/eval_test_daily.csv ]; then
-          RL_MODELS=/rl-engine-models
+        rm -rf $$A/results $$A/explain $$A/team-results $$A/demo /tmp/rl /tmp/eval-bundle
+        echo "[eval-bootstrap] evaluation-xai compare-rl 결과 내려받는 중"
+        if python - <<'PY'
+        import hashlib, os, pathlib, shutil, sys, tarfile, urllib.request
+        url, digest = os.environ["EVAL_RESULTS_URL"], os.environ["EVAL_RESULTS_SHA256"]
+        # 선택: 같은 파일을 /eval-inbox에 마운트하면 내려받지 않는다 (오프라인 개발용)
+        local = pathlib.Path("/eval-inbox") / url.rsplit("/", 1)[-1]
+        try:
+            data = local.read_bytes() if local.is_file() else urllib.request.urlopen(url, timeout=120).read()
+        except OSError as error:
+            sys.exit(f"[eval-bootstrap] 내려받기 실패: {error}")
+        if hashlib.sha256(data).hexdigest() != digest:
+            sys.exit("[eval-bootstrap] 지문(sha256)이 달라 사용하지 않음")
+        archive = pathlib.Path("/tmp/eval-bundle.tar.gz")
+        archive.write_bytes(data)
+        with tarfile.open(archive) as tar:
+            tar.extractall("/tmp/eval-bundle", filter="data")
+        found = [p.parent for p in pathlib.Path("/tmp/eval-bundle").glob("*/evaluation.json")]
+        if len(found) != 1:
+            sys.exit("[eval-bootstrap] 결과 묶음 형식이 다름")
+        shutil.move(str(found[0]), "/app/artifacts/results")
+        PY
+        then
+          ln -s results $$A/explain
+          echo "[eval-bootstrap] compare-rl 결과 사용 (ANOVA 3종·실제 SHAP)"
         else
-          echo "[eval-bootstrap] rl-engine $$RL_ENGINE_COMMIT 결과 CSV 내려받는 중"
-          python - <<'PY'
+          echo "[eval-bootstrap] 대체 분석: rl-engine 공개 CSV(import-rl) + SHAP 합성 데모"
+          if [ -f /rl-engine-models/eval_test_daily.csv ]; then
+            RL_MODELS=/rl-engine-models
+          else
+            python - <<'PY'
         import io, os, tarfile, urllib.request
         url = "https://codeload.github.com/codyssey-dmu-2026/rl-engine/tar.gz/" + os.environ["RL_ENGINE_COMMIT"]
         with urllib.request.urlopen(url, timeout=120) as r:
@@ -143,11 +173,12 @@ services:
                 with open("/tmp/rl/models/" + parts[2], "wb") as f:
                     f.write(archive.extractfile(m).read())
         PY
-          RL_MODELS=/tmp/rl/models
+            RL_MODELS=/tmp/rl/models
+          fi
+          python -m evaluation_xai import-rl --models-dir "$$RL_MODELS" --output $$A/results
+          python -m evaluation_xai demo --output $$A/explain --with-shap
         fi
-        python -m evaluation_xai import-rl --models-dir "$$RL_MODELS" --output $$A/team-results
-        python -m evaluation_xai demo --output $$A/demo --with-shap
-        echo "$$EVAL_COMMIT" > $$A/.eval-commit
+        echo "$$STAMP" > $$A/.eval-commit
     volumes:
       - eval-artifacts:/app/artifacts
     networks:
@@ -164,7 +195,7 @@ services:
     volumes:
       - eval-artifacts:/app/artifacts:ro
     environment:
-      EVALUATION_ARTIFACT_DIR: ${EVALUATION_ARTIFACT_DIR:-/app/artifacts/team-results}
+      EVALUATION_ARTIFACT_DIR: ${EVALUATION_ARTIFACT_DIR:-/app/artifacts/results}
     depends_on:
       eval-bootstrap:
         condition: service_completed_successfully
@@ -176,15 +207,15 @@ services:
     restart: unless-stopped
 
   # 1-1. 같은 이미지의 SHAP 설명 전용 인스턴스 (내부망 전용, /explain·Summary/Force Plot)
-  #   evaluation-xai API는 산출물 폴더 하나만 읽으므로, 성과(team-results)와 설명(demo)을 나눠 띄운다
-  #   실제 PPO SHAP 산출물이 공유되면 EVAL_EXPLAIN_ARTIFACT_DIR만 바꾸면 된다
+  #   evaluation-xai API는 산출물 폴더 하나만 읽으므로, 성과(results)와 설명(explain)을 나눠 띄운다
+  #   (compare-rl 결과를 쓰면 explain은 results와 같은 폴더를 가리킨다)
   evaluation-xai-explain:
     image: robo-evaluation-xai:local
     container_name: robo-eval-xai-explain
     volumes:
       - eval-artifacts:/app/artifacts:ro
     environment:
-      EVALUATION_ARTIFACT_DIR: ${EVAL_EXPLAIN_ARTIFACT_DIR:-/app/artifacts/demo}
+      EVALUATION_ARTIFACT_DIR: ${EVAL_EXPLAIN_ARTIFACT_DIR:-/app/artifacts/explain}
     depends_on:
       eval-bootstrap:
         condition: service_completed_successfully
@@ -266,7 +297,7 @@ services:
       AGENT_API_URL: http://agentic-research:8001
       RL_API_URL: http://rl-engine:8002
       # 일별 시계열(/backtest/{run_id}/timeseries)을 evaluation-xai 산출물에서 읽음
-      EVAL_ARTIFACT_DIR: /eval-artifacts/team-results
+      EVAL_ARTIFACT_DIR: /eval-artifacts/results
     volumes:
       - eval-artifacts:/eval-artifacts:ro
     depends_on:

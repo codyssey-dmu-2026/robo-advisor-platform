@@ -153,8 +153,8 @@ def page_header(title: str, subtitle: str, *, data_mode: str | None = None) -> N
                     "실데이터 · 잠정",
                     icon=":material/pending_actions:",
                     color="blue",
-                    help="rl-engine의 실제 Walk-Forward 결과를 evaluation-xai가 분석한 잠정 결과입니다. "
-                    "원자료 재실행·MVO 비교 등 최종 검증은 남아 있습니다.",
+                    help="rl-engine의 실제 결과를 evaluation-xai가 분석한 잠정 결과입니다. "
+                    "가격·환율·무위험수익률·시장별 시각 등 최종 평가 조건 검증이 남아 있습니다.",
                 )
 
 
