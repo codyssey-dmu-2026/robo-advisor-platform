@@ -172,12 +172,16 @@ def line(
         key=lambda end: end[1],
     )
     values = [v for x, y in series.values() for v in y if v is not None]
-    span = (max(values) - min(values)) if values else 0.0
-    shifts, last = [], None
+    low = min(values) if values else 0.0
+    span = (max(values) - low) if values else 0.0
+    # 값의 화면 위치(픽셀 근사)를 아래부터 차례로 쌓아, 앞 라벨과 14px 이상 떨어뜨린다
+    pixels = max(height - 120, 60) / span if span > 0 else 0.0
+    shifts, previous = [], None
     for _, value in ends:
-        close = last is not None and span > 0 and (value - last[0]) < span * 0.06
-        shifts.append(last[1] + 14 if close else 0)
-        last = (value, shifts[-1])
+        position = (value - low) * pixels
+        placed = position if previous is None else max(position, previous + 14)
+        shifts.append(placed - position)
+        previous = placed
     for (end_x, end_y), shift in zip(ends, shifts):
         fig.add_annotation(
             x=end_x,
