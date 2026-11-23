@@ -39,6 +39,13 @@ RL_DATA_DIR = Path(
 )
 # rl-engine Walk-Forward 백테스트 결과 CSV 폴더 (eval_test_*.csv, 모델 번들에 포함)
 RL_RESULTS_DIR = Path(os.getenv("RL_RESULTS_DIR", RL_MODELS_DIR))
+# 학습 곡선 CSV (rl-engine TensorBoard 기록을 scripts/export_learning_curves.py로 변환)
+RL_LEARNING_CURVES = Path(
+    os.getenv(
+        "RL_LEARNING_CURVES",
+        Path(__file__).resolve().parent / "data" / "learning_curves.csv",
+    )
+)
 # agentic-research가 만든 리스크 태그 파일 (읽기 전용)
 RISK_TAGS_PATH = Path(
     os.getenv(
@@ -843,6 +850,65 @@ def health_check():
         "as_of_min": str(schedule.as_of_min.date()),
         "as_of_max": str(schedule.as_of_max.date()),
     }
+
+
+def _round(values: pd.Series, digits: int = 6) -> List[Optional[float]]:
+    return [_clean(round(float(v), digits)) if pd.notna(v) else None for v in values]
+
+
+def build_learning_curves(frame: pd.DataFrame) -> dict:
+    """실행별 학습 곡선과 요약 (시작·마지막 평균 보상, 마지막 에피소드 길이)."""
+    runs = []
+    for run, curve in frame.groupby("run", sort=True):
+        curve = curve.sort_values("step")
+        reward = curve["ep_rew_mean"]
+        first = curve.iloc[0]
+        runs.append(
+            {
+                "run": run,
+                "stage": first["stage"],
+                "window": int(first["window"]),
+                "variant": first["variant"],
+                "seed": int(first["seed"]),
+                "steps": [int(v) for v in curve["step"]],
+                "ep_rew_mean": _round(reward),
+                "ep_len_mean": _round(curve["ep_len_mean"], 2),
+                # 처음·마지막 5개 기록 평균 (한 점의 흔들림에 덜 민감하게)
+                "start_reward": _clean(reward.head(5).mean()),
+                "end_reward": _clean(reward.tail(5).mean()),
+                "end_episode_length": _clean(curve["ep_len_mean"].tail(5).mean()),
+                "total_steps": int(curve["step"].max()),
+            }
+        )
+    return {
+        "status": "ok",
+        "metric": "rollout/ep_rew_mean",
+        "current_model": RL_MODEL_NAME,
+        "run_count": len(runs),
+        "runs": runs,
+        "note": (
+            "Episode Reward는 보상 함수마다 식이 달라(단순 수익률·샤프비율·MDD 페널티) "
+            "값의 크기를 서로 비교할 수 없습니다. 같은 보상 함수 안에서 수렴 여부를 봅니다."
+        ),
+        "source": "rl-engine 학습 TensorBoard 기록 (PPO, 100,352 스텝)",
+        "disclaimer": DISCLAIMER,
+    }
+
+
+@lru_cache(maxsize=1)
+def get_learning_curves() -> dict:
+    return build_learning_curves(pd.read_csv(RL_LEARNING_CURVES))
+
+
+@app.get("/learning-curves")
+def learning_curves():
+    """PPO 학습 곡선 (보상 함수 5종 × 구간 4 × seed 3, 최종·선택용 학습)."""
+    try:
+        return get_learning_curves()
+    except (OSError, ValueError, KeyError) as error:
+        raise HTTPException(
+            503, f"학습 곡선 기록을 읽을 수 없습니다: {error}"
+        ) from error
 
 
 @app.get("/performance")

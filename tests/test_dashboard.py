@@ -129,6 +129,29 @@ SHAP_EXPLAIN = {
 PLOTS = "/explain/plots/toy_policy/toy0/SYN00"
 
 
+def _learning_curves() -> dict:
+    """/learning-curves 응답 형식: 현재 모델 구간의 단순 수익률 seed 2개."""
+    import rl_server
+
+    window = int(rl_server.RL_MODEL_NAME.split("_w")[1].split("_")[0])
+    rows = [
+        {
+            "run": f"ppo_test_w{window}_simple_s{seed}",
+            "stage": "test",
+            "window": window,
+            "variant": "simple",
+            "seed": seed,
+            "attempt": "PPO_1",
+            "step": step,
+            "ep_rew_mean": step / 1e6,
+            "ep_len_mean": 240.0,
+        }
+        for seed in (42, 43)
+        for step in range(20480, 102400 + 1, 20480)
+    ]
+    return rl_server.build_learning_curves(pd.DataFrame(rows))
+
+
 def _guard_backtest() -> dict:
     """/risk-tags/backtest 응답 형식 (켬 쪽 누적 +2%p, MDD −1%p)."""
     keys = [
@@ -226,6 +249,7 @@ def online_gateway(perf_results, write_tags, monkeypatch):
         f"{PLOTS}/force": b"<html><body>force plot</body></html>",
         "/risk-tags": rl_server.build_guard_summary(schedule, tags),
         "/risk-tags/backtest": _guard_backtest(),
+        "/learning-curves": _learning_curves(),
         "/health": {
             "gateway": "ok",
             "services": {
@@ -321,6 +345,16 @@ def test_20_risk_page_shows_risk_tag_guard_summary(online_gateway):
     days = next(m for m in at.metric if m.label == "발동일")
     assert days.value == "2일"
     assert any("백테스트 성과에는" in c.value for c in at.caption)
+
+
+def test_24_performance_page_shows_learning_curves(online_gateway):
+    """24. 강화학습 성과 화면의 학습 곡선 탭이 현재 모델 요약과 보상 함수별 요약 표를 보여 주는지 검증"""
+    at = _page("views/performance.py")
+    assert any("현재 서빙 모델" in c.value for c in at.caption)
+    table = next(d.value for d in at.dataframe if "마지막 평균 보상" in d.value.columns)
+    assert len(table) == 2 and set(table["seed"]) == {42, 43}
+    assert table["학습 스텝"].min() >= 100_000
+    assert any("기록 없음" in c.value for c in at.caption)  # 다른 보상 함수 칸
 
 
 def test_23_risk_page_compares_guard_on_and_off(online_gateway):

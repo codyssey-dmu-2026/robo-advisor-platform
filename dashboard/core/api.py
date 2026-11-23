@@ -125,6 +125,12 @@ def risk_tags() -> dict:
     return _request("GET", "/risk-tags")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def learning_curves() -> dict:
+    """PPO 학습 곡선 (rl-engine TensorBoard 기록)."""
+    return _request("GET", "/learning-curves")
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def guard_backtest() -> dict:
     """리스크 태그 Safe-Guard를 끈 경우와 켠 경우의 평가 구간 성과 비교."""

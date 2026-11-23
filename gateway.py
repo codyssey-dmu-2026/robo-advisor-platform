@@ -170,6 +170,17 @@ class RiskTagsResponse(PassThrough):
     disclaimer: str
 
 
+class LearningCurvesResponse(PassThrough):
+    metric: str = Field(description="학습 곡선 지표 (rollout/ep_rew_mean)")
+    current_model: str
+    run_count: int
+    runs: List[Dict[str, Any]] = Field(
+        description="실행별 스텝·평균 에피소드 보상·에피소드 길이와 시작/마지막 요약"
+    )
+    note: str
+    disclaimer: str
+
+
 class GuardBacktestResponse(PassThrough):
     model_name: str
     period: Dict[str, str] = Field(description="비교 구간 (현재 모델의 테스트 연도)")
@@ -393,6 +404,22 @@ async def rl_performance():
     return await _forward(
         "GET",
         f"{RL_API_URL}/performance",
+        "RL Engine(8002)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
+
+
+@app.get(
+    "/learning-curves",
+    summary="(보조) PPO 학습 곡선 (보상 함수 5종 × 구간 4 × seed 3)",
+    response_model=LearningCurvesResponse,
+    response_model_exclude_unset=True,
+)
+async def rl_learning_curves():
+    """강화학습 성과 화면의 학습 곡선 탭용. rl-engine TensorBoard 기록 변환본."""
+    return await _forward(
+        "GET",
+        f"{RL_API_URL}/learning-curves",
         "RL Engine(8002)",
         timeout=UPSTREAM_TIMEOUT_S,
     )

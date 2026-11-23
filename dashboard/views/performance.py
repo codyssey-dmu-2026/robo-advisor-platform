@@ -6,11 +6,11 @@ import streamlit as st
 from core import api, charts
 from core.ui import (
     METRIC_LABELS,
-    empty_state,
     load,
     page_header,
     perf_entries,
     perf_label,
+    table_view,
     window_label,
 )
 
@@ -30,6 +30,108 @@ def fmt(value: float | None, kind: str) -> str:
     if value is None:
         return "—"
     return f"{value:.2%}" if kind == "pct" else f"{value:.3f}"
+
+
+# 학습 곡선: 과제 필수 3종을 윗줄, MDD λ 탐색 2개를 아랫줄에 둔다
+VARIANTS = {
+    "simple": "단순 수익률 (r_t)",
+    "sharpe": "샤프비율 (r_t / σ_t)",
+    "mdd_l1.0": "MDD 페널티 λ=1.0",
+    "mdd_l0.5": "MDD 페널티 λ=0.5",
+    "mdd_l5.0": "MDD 페널티 λ=5.0",
+}
+STAGES = {"test": "최종 모델 학습", "val": "선택용 학습 (검증 구간)"}
+
+
+def learning_curve_tab(perf: dict) -> None:
+    curves = load(api.learning_curves, spinner="학습 곡선 불러오는 중…")
+    if not curves:
+        return
+    runs = curves["runs"]
+    current = next((r for r in runs if r["run"] == curves["current_model"]), None)
+    c1, c2 = st.columns(2)
+    stage = c1.segmented_control(
+        "학습 단계",
+        list(STAGES),
+        default="test",
+        format_func=STAGES.get,
+        required=True,
+        key="lc_stage",
+        help="최종 모델: 학습 구간 전체로 학습해 다음 해에 테스트한 모델. "
+        "선택용: 학습 구간 마지막 6개월을 떼어 보상 함수·설정을 고를 때 쓴 모델",
+    )
+    windows = sorted({r["window"] for r in runs})
+    window = c2.segmented_control(
+        "테스트 연도 (Walk-Forward 구간)",
+        windows,
+        default=current["window"] if current else windows[-1],
+        format_func=lambda w: window_label(perf, w),
+        required=True,
+        key="lc_window",
+    )
+    st.caption(
+        f":material/info: {curves['note']} "
+        "가로축은 학습 스텝(최소 기준 100,000), 세로축은 최근 에피소드의 평균 보상입니다."
+    )
+    if current:
+        st.caption(
+            f"현재 서빙 모델 `{current['run']}`: 평균 보상 "
+            f"{current['start_reward']:.3f} → {current['end_reward']:.3f} "
+            f"({current['total_steps']:,} 스텝)"
+        )
+
+    chosen = [r for r in runs if r["stage"] == stage and r["window"] == window]
+    seeds = sorted({r["seed"] for r in chosen})
+    colors = charts.color_map([f"seed {s}" for s in seeds])
+    keys = list(VARIANTS)
+    for row in (keys[:3], keys[3:]):
+        if row == keys[3:]:
+            st.caption("MDD 페널티 강도(λ) 탐색")
+        for col, variant in zip(st.columns(3), row):
+            lines = {
+                f"seed {r['seed']}": (r["steps"], r["ep_rew_mean"])
+                for r in sorted(chosen, key=lambda r: r["seed"])
+                if r["variant"] == variant
+            }
+            with col, st.container(border=True):
+                st.markdown(f"**{VARIANTS[variant]}**")
+                if lines:
+                    charts.show(
+                        charts.line(lines, colors=colors, percent_y=False, height=240),
+                        key=f"lc_{stage}_{window}_{variant}",
+                    )
+                else:
+                    st.caption("기록 없음")
+
+    table_view(
+        pd.DataFrame(
+            [
+                {
+                    "보상 함수": VARIANTS.get(r["variant"], r["variant"]),
+                    "seed": r["seed"],
+                    "시작 평균 보상": r["start_reward"],
+                    "마지막 평균 보상": r["end_reward"],
+                    "변화": r["end_reward"] - r["start_reward"],
+                    "마지막 평균 에피소드 길이": r["end_episode_length"],
+                    "학습 스텝": r["total_steps"],
+                }
+                for r in sorted(
+                    chosen, key=lambda r: (keys.index(r["variant"]), r["seed"])
+                )
+            ]
+        ),
+        label="표로 보기 (처음·마지막 5개 기록 평균)",
+        column_config={
+            c: st.column_config.NumberColumn(format="%.3f")
+            for c in ["시작 평균 보상", "마지막 평균 보상", "변화"]
+        }
+        | {
+            "마지막 평균 에피소드 길이": st.column_config.NumberColumn(
+                format="%.0f일",
+                help="학습 중 낙폭이 15%를 넘으면 에피소드가 조기 종료(Safe-Guard)됩니다",
+            )
+        },
+    )
 
 
 if perf:
@@ -174,11 +276,6 @@ if perf:
         )
 
     with tab_curve:
-        empty_state(
-            "학습 곡선은 rl-engine 학습 기록을 받는 중입니다.",
-            "PPO 학습 중 Episode Reward 기록(TensorBoard 로그)이 공유되면 "
-            "보상 함수별(단순 수익률·샤프·MDD 페널티) 수렴 곡선이 이곳에 표시됩니다.",
-            icon=":material/model_training:",
-        )
+        learning_curve_tab(perf)
 
     st.caption(f":material/database: 출처: {perf['source']}")
