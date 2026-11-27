@@ -1080,3 +1080,35 @@ def risk_tags_backtest():
     if tags is None:
         raise HTTPException(503, reason)
     return get_guard_backtest()
+
+
+@app.get("/model-registry")
+def model_registry():
+    """MLflow 모델 저장소의 운영·후보 버전과 지금 서빙 중인 버전 (MLOps 화면용)."""
+    serving = model_source_info()
+    if not RL_MODEL_URI:
+        return {
+            "available": False,
+            "reason": "RL_MODEL_URI가 비어 있어 파일 모델을 사용합니다",
+            "serving": serving,
+        }
+    try:
+        from mlops.registry import parse_uri, summarize_aliases
+
+        summary = summarize_aliases(parse_uri(RL_MODEL_URI)[0])
+    except Exception as error:
+        return {
+            "available": False,
+            "reason": f"MLflow 모델 저장소에 연결할 수 없습니다 ({type(error).__name__})",
+            "serving": serving,
+        }
+    production = summary["aliases"].get("production", {})
+    return {
+        "available": True,
+        **summary,
+        "serving": serving,
+        # 운영 버전을 옮겼지만 RL 서버를 다시 시작하지 않은 경우
+        "restart_needed": bool(
+            production and production.get("version") != serving.get("version")
+        ),
+    }

@@ -13,3 +13,5 @@ stable_baselines3==2.3.2
 torch==2.14.1
 # MLflow 모델 저장소에서 서빙 모델을 받고 실험을 등록하는 클라이언트 (서버는 Dockerfile.mlflow)
 mlflow-skinny==3.17.2
+# 재학습(mlops.retrain) 때 rl-engine 학습 함수가 TensorBoard 기록을 남기므로 필요
+tensorboard==2.20.0

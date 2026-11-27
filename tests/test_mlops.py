@@ -163,3 +163,106 @@ def test_model_source_uses_registry_version(monkeypatch, tmp_path):
     assert rl_server.model_source()["dir"] == tmp_path
     assert len(calls) == 1
     assert rl_server.model_source_info()["source"] == "mlflow"
+
+
+# ---------------- 2부: 재학습 파이프라인 ----------------
+from datetime import datetime, timezone  # noqa: E402
+
+from mlops import retrain  # noqa: E402
+
+
+def test_parse_variant():
+    """보상 함수 이름에서 rl-engine 학습 설정(reward_type, λ)을 읽는지 검증"""
+    assert retrain.parse_variant("simple") == ("simple", 1.0)
+    assert retrain.parse_variant("mdd_l0.5") == ("mdd", 0.5)
+    with pytest.raises(ValueError):
+        retrain.parse_variant("unknown")
+
+
+@pytest.mark.parametrize(
+    "candidate, reference, ok, phrase",
+    [
+        (0.40, 0.367, True, "≥ 원래"),
+        (0.10, 0.367, False, "< 원래"),
+        (None, 0.367, False, "계산하지 못함"),
+        (0.40, None, False, "사람이 검토"),
+    ],
+)
+def test_promotion_uses_validation_sharpe_only(candidate, reference, ok, phrase):
+    """승격 권장은 검증 샤프로만 정하고, 비교 기준이 없으면 사람 검토로 넘기는지 검증"""
+    recommended, reason = retrain.recommend(candidate, reference, 0.0)
+    assert recommended is ok
+    assert phrase in reason
+
+
+def test_next_run_is_today_or_tomorrow():
+    """다음 실행 시각이 오늘 그 시각(아직 안 지났으면) 또는 내일인지 검증"""
+    morning = datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc)
+    assert retrain.next_run(morning, "19:00") == morning.replace(hour=19)
+    evening = datetime(2026, 11, 27, 20, 0, tzinfo=timezone.utc)
+    assert retrain.next_run(evening, "19:00").day == 28
+
+
+def test_fingerprint_changes_with_data_and_window_follows_manifest(tmp_path):
+    """데이터 파일이 바뀌면 지문이 바뀌고, 마지막 Walk-Forward 구간을 고르는지 검증"""
+    manifest = {"windows": [{"window": 1}, {"window": 4}, {"window": 2}]}
+    (tmp_path / "walk_forward_manifest.json").write_text(json.dumps(manifest))
+    (tmp_path / "returns.parquet").write_bytes(b"returns-v1")
+    (tmp_path / "features_window4.parquet").write_bytes(b"features")
+    assert retrain.latest_window(tmp_path) == 4
+    before = retrain.data_fingerprint(tmp_path, 4)
+    assert before == retrain.data_fingerprint(tmp_path, 4)
+    (tmp_path / "returns.parquet").write_bytes(b"returns-v2")
+    assert retrain.data_fingerprint(tmp_path, 4) != before
+
+
+@pytest.mark.parametrize(
+    "applied, serving, has_alias, move",
+    [
+        (None, "ppo_test_w4_simple_s42", False, True),  # 처음
+        ("ppo_test_w4_simple_s42", "ppo_test_w4_simple_s42", True, False),  # 승격 유지
+        ("ppo_test_w4_simple_s42", "ppo_test_w4_sharpe_s42", True, True),  # 설정 변경
+        ("ppo_test_w4_simple_s42", "ppo_test_w4_simple_s42", False, True),  # 별칭 없음
+    ],
+)
+def test_bootstrap_keeps_promoted_version_unless_config_changes(
+    applied, serving, has_alias, move
+):
+    """설정값(RL_MODEL_NAME)이 그대로면 사람이 승격한 운영 버전을 되돌리지 않는지 검증"""
+    assert reg.should_move_production(applied, serving, has_alias) is move
+
+
+def test_model_registry_endpoint(monkeypatch):
+    """/model-registry가 MLflow 미사용·연결 실패·정상(재시작 필요 표시) 경우를 구분하는지 검증"""
+    import mlops.registry
+
+    client = TestClient(rl_server.app)
+    monkeypatch.setattr(rl_server, "RL_MODEL_URI", "")
+    assert client.get("/model-registry").json()["available"] is False
+
+    monkeypatch.setattr(rl_server, "RL_MODEL_URI", "models:/ppo-portfolio@production")
+    monkeypatch.setattr(
+        rl_server, "_REGISTRY", {"name": "m", "source": "mlflow", "version": "58"}
+    )
+
+    def down(name):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(mlops.registry, "summarize_aliases", down)
+    data = client.get("/model-registry").json()
+    assert data["available"] is False and "ConnectionError" in data["reason"]
+
+    def summary(name):
+        return {
+            "registered_model": name,
+            "version_count": 61,
+            "aliases": {
+                "production": {"version": "61"},
+                "candidate": {"version": "61"},
+            },
+        }
+
+    monkeypatch.setattr(mlops.registry, "summarize_aliases", summary)
+    data = client.get("/model-registry").json()
+    assert data["available"] is True and data["version_count"] == 61
+    assert data["restart_needed"] is True  # 운영 v61, 서빙 중 v58

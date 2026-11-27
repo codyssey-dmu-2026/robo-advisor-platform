@@ -256,6 +256,29 @@ def online_gateway(perf_results, write_tags, monkeypatch):
         "/risk-tags": rl_server.build_guard_summary(schedule, tags),
         "/risk-tags/backtest": _guard_backtest(),
         "/learning-curves": _learning_curves(),
+        "/model-registry": {
+            "available": True,
+            "registered_model": "ppo-portfolio",
+            "version_count": 61,
+            "aliases": {
+                "production": {
+                    "version": "58",
+                    "model_name": "ppo_test_w4_simple_s42",
+                    "kind": "original",
+                    "metrics": {"sharpe": 2.15},
+                },
+                "candidate": {
+                    "version": "61",
+                    "model_name": "ppo_test_w4_simple_s42_r202611271134",
+                    "kind": "retrain",
+                    "promotion_recommended": "false",
+                    "promotion_reason": "검증 샤프 0.300 < 원래 0.367 (-0.067)",
+                    "metrics": {"val_sharpe": 0.3, "reference_val_sharpe": 0.367},
+                },
+            },
+            "serving": {"source": "mlflow", "version": "58"},
+            "restart_needed": False,
+        },
         "/health": {
             "gateway": "ok",
             "services": {
@@ -370,6 +393,11 @@ def test_24_performance_page_shows_learning_curves(online_gateway):
     assert any("기록 없음" in c.value for c in at.caption)  # 다른 보상 함수 칸
     # 서빙 모델 출처: MLflow 모델 저장소 버전
     assert any("`ppo-portfolio` v58" in c.value for c in at.caption)
+    # 모델 저장소: 운영·후보 버전과 승격 판단
+    registry = next(d.value for d in at.dataframe if "승격 권장" in d.value.columns)
+    assert list(registry["별칭"]) == ["운영 중", "재학습 후보"]
+    assert list(registry["승격 권장"]) == ["—", "— 보류"]
+    assert any("재학습 판단 근거" in c.value for c in at.caption)
 
 
 def test_23_risk_page_compares_guard_on_and_off(online_gateway):

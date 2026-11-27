@@ -125,6 +125,12 @@ def risk_tags() -> dict:
     return _request("GET", "/risk-tags")
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def model_registry() -> dict:
+    """MLflow 모델 저장소의 운영·후보 버전 (재학습 결과 확인용)."""
+    return _request("GET", "/model-registry")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def learning_curves() -> dict:
     """PPO 학습 곡선 (rl-engine TensorBoard 기록)."""
