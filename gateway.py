@@ -221,6 +221,9 @@ class ExplainResponse(PassThrough):
 
 class ExplainCatalogResponse(BaseModel):
     data_mode: Optional[str] = Field(default=None, description="synthetic / real")
+    status: Optional[str] = Field(
+        default=None, description="평가 묶음 상태 (예: provisional = 최종 검증 전)"
+    )
     explanations: Dict[str, List[str]] = Field(
         description="'run_id/decision_id' → 설명 가능한 자산 목록"
     )
@@ -490,6 +493,7 @@ async def explain_catalog():
     explanations = bundle.get("explanations") or {}
     return {
         "data_mode": bundle.get("data_mode"),
+        "status": bundle.get("status"),
         "explanations": {
             key: list(item.get("asset_names", []))
             for key, item in sorted(explanations.items())
