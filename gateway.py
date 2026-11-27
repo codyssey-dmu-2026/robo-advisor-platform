@@ -413,6 +413,21 @@ async def rl_performance():
 
 
 @app.get(
+    "/model-registry",
+    summary="(보조) MLflow 모델 저장소: 운영·후보 버전과 서빙 중인 버전",
+    response_model=PassThrough,
+)
+async def rl_model_registry():
+    """MLOps: 재학습 후보의 승격 권장 여부와 서빙 버전을 대시보드에 보여 주기 위한 요약."""
+    return await _forward(
+        "GET",
+        f"{RL_API_URL}/model-registry",
+        "RL Engine(8002)",
+        timeout=UPSTREAM_TIMEOUT_S,
+    )
+
+
+@app.get(
     "/learning-curves",
     summary="(보조) PPO 학습 곡선 (보상 함수 5종 × 구간 4 × seed 3)",
     response_model=LearningCurvesResponse,

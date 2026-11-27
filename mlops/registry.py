@@ -47,3 +47,56 @@ def resolve_model(uri: str, destination: Path) -> dict:
         "version": str(version.version),
         "run_id": version.run_id,
     }
+
+
+def _version_summary(client, version) -> dict:
+    tags = dict(version.tags)
+    metrics = {}
+    if version.run_id:
+        run = client.get_run(version.run_id).data.metrics
+        for key in ("val_sharpe", "reference_val_sharpe", "test_sharpe", "sharpe"):
+            if key in run:
+                metrics[key] = run[key]
+    name = tags.get("model_name") or ""
+    if "val_sharpe" not in metrics and name.startswith("ppo_test_"):
+        # 원래 학습 모델은 같은 설정의 선택용(val) 학습 기록에서 검증 샤프를 가져온다
+        found = client.get_experiment_by_name("rl-engine-val")
+        if found is not None:
+            runs = client.search_runs(
+                [found.experiment_id],
+                f"tags.model_name = '{name.replace('ppo_test_', 'ppo_val_', 1)}'",
+                max_results=1,
+            )
+            if runs and "sharpe" in runs[0].data.metrics:
+                metrics["val_sharpe"] = runs[0].data.metrics["sharpe"]
+    return {
+        "version": str(version.version),
+        "model_name": tags.get("model_name"),
+        "kind": tags.get("kind", "original"),
+        "variant": tags.get("variant"),
+        "seed": tags.get("seed"),
+        "promotion_recommended": tags.get("promotion_recommended"),
+        "promotion_reason": tags.get("promotion_reason"),
+        "created_ms": version.creation_timestamp,
+        "metrics": metrics,
+    }
+
+
+def summarize_aliases(name: str = MODEL_NAME) -> dict:
+    """운영(production)·후보(candidate) 버전 요약과 전체 버전 수."""
+    from mlflow import MlflowClient
+    from mlflow.exceptions import MlflowException
+
+    client = MlflowClient()
+    model = client.get_registered_model(name)
+    aliases = {}
+    for alias in (PRODUCTION, CANDIDATE):
+        try:
+            version = client.get_model_version_by_alias(name, alias)
+        except MlflowException:
+            continue
+        aliases[alias] = _version_summary(client, version)
+    count = len(client.search_model_versions(f"name='{name}'"))
+    return {"registered_model": name, "version_count": count, "aliases": aliases} | {
+        "description": model.description
+    }

@@ -30,6 +30,8 @@ CURVES = Path(os.getenv("RL_LEARNING_CURVES", ROOT / "data" / "learning_curves.c
 SERVING_MODEL = os.getenv("SERVING_MODEL", "ppo_test_w4_simple_s42")
 SOURCE = os.getenv("REGISTRY_SOURCE", "rl-engine 05579d2 · platform Release models-v1")
 FORCE = os.getenv("REGISTRY_FORCE", "0") == "1"
+# 마지막으로 production에 반영한 설정값(RL_MODEL_NAME)을 등록 모델 태그로 남긴다
+APPLIED = "serving_model_config"
 
 RUN = re.compile(
     r"^ppo_(?P<stage>test|val)_w(?P<window>\d+)_(?P<variant>.+)_s(?P<seed>\d+)$"
@@ -284,11 +286,28 @@ def main() -> None:
         sys.exit(
             f"[mlflow-bootstrap] 서빙 모델이 등록돼 있지 않습니다: {SERVING_MODEL}"
         )
-    version = versions[SERVING_MODEL]
-    client.set_registered_model_alias(MODEL_NAME, PRODUCTION, version)
-    print(
-        f"[mlflow-bootstrap] {MODEL_NAME}@{PRODUCTION} → v{version} ({SERVING_MODEL})"
-    )
+    model = client.get_registered_model(MODEL_NAME)
+    applied = model.tags.get(APPLIED)
+    if should_move_production(applied, SERVING_MODEL, PRODUCTION in model.aliases):
+        version = versions[SERVING_MODEL]
+        client.set_registered_model_alias(MODEL_NAME, PRODUCTION, version)
+        client.set_registered_model_tag(MODEL_NAME, APPLIED, SERVING_MODEL)
+        print(f"[mlflow-bootstrap] {MODEL_NAME}@{PRODUCTION} → v{version}")
+    else:
+        # 설정이 그대로면 승격(mlops.promote)으로 옮긴 운영 버전을 되돌리지 않는다
+        current = model.aliases[PRODUCTION]
+        print(
+            f"[mlflow-bootstrap] 설정 변경 없음: "
+            f"{MODEL_NAME}@{PRODUCTION} v{current} 유지"
+        )
+
+
+def should_move_production(applied: str | None, serving: str, has_alias: bool) -> bool:
+    """production 별칭을 설정값(RL_MODEL_NAME) 모델로 옮길지.
+
+    처음이거나 설정값이 바뀌었을 때만 옮긴다. 설정이 그대로면 사람이 승격한 버전을 유지한다.
+    """
+    return not has_alias or applied != serving
 
 
 if __name__ == "__main__":

@@ -54,6 +54,61 @@ def model_source_caption() -> str | None:
     return None
 
 
+ALIASES = {"production": "운영 중", "candidate": "재학습 후보"}
+
+
+def model_registry_panel() -> None:
+    """MLflow 모델 저장소의 운영·후보 버전과 승격 권장 여부 (MLOps)."""
+    try:
+        registry = api.model_registry()
+    except api.ApiError:
+        return
+    if not registry.get("available"):
+        return
+    aliases = registry.get("aliases", {})
+    with st.expander(
+        f"모델 버전 · MLflow `{registry['registered_model']}` "
+        f"(버전 {registry['version_count']}개)",
+        icon=":material/inventory_2:",
+    ):
+        rows = []
+        for alias, label in ALIASES.items():
+            item = aliases.get(alias)
+            if not item:
+                continue
+            metrics = item.get("metrics", {})
+            recommended = item.get("promotion_recommended")
+            rows.append(
+                {
+                    "별칭": label,
+                    "버전": f"v{item['version']}",
+                    "모델": item.get("model_name"),
+                    "종류": "재학습" if item.get("kind") == "retrain" else "원래 학습",
+                    "검증 샤프": fmt(metrics.get("val_sharpe"), "num"),
+                    "원래 검증 샤프": fmt(metrics.get("reference_val_sharpe"), "num"),
+                    "승격 권장": {"true": "✅ 권장", "false": "— 보류"}.get(
+                        recommended, "—"
+                    ),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        candidate = aliases.get("candidate")
+        if candidate and candidate.get("promotion_reason"):
+            st.caption(f"재학습 판단 근거: {candidate['promotion_reason']}")
+        if registry.get("restart_needed"):
+            st.warning(
+                "운영 버전이 바뀌었지만 RL 서버가 아직 이전 버전을 서빙 중입니다. "
+                "`docker compose restart rl-engine`으로 반영하세요.",
+                icon=":material/restart_alt:",
+            )
+        st.caption(
+            "재학습은 매일 정해진 시각에 돌고(`docker compose --profile mlops up -d`), "
+            "후보는 자동으로 서빙하지 않습니다. 확인 후 "
+            "`docker compose run --rm retrain python -m mlops.promote --yes`로 승격합니다. "
+            "승격 판단은 검증 구간 성적만 쓰고, 테스트 구간 성적은 쓰지 않습니다."
+        )
+
+
 # 학습 곡선: 과제 필수 3종을 윗줄, MDD λ 탐색 2개를 아랫줄에 둔다
 VARIANTS = {
     "simple": "단순 수익률 (r_t)",
@@ -196,6 +251,7 @@ if perf:
         source = model_source_caption()
         if source:
             st.caption(source)
+        model_registry_panel()
 
     tab_cmp, tab_table, tab_curve = st.tabs(
         [
