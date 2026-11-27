@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1
+# MLflow 추적 서버(5000): 실험 기록(sqlite)과 모델 체크포인트(artifacts)를 볼륨에 저장
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 MLFLOW_DISABLE_AGENT_HINT=1
+WORKDIR /mlflow
+COPY requirements-mlflow.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-mlflow.txt
+EXPOSE 5000
+# 다른 컨테이너(mlflow:5000)와 브라우저(localhost:5000)에서 오는 요청만 받는다
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", \
+     "--backend-store-uri", "sqlite:////mlflow/data/mlflow.db", \
+     "--artifacts-destination", "/mlflow/data/artifacts", \
+     "--allowed-hosts", "mlflow:5000,localhost:5000,127.0.0.1:5000"]

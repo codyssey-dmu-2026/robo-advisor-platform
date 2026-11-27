@@ -11,3 +11,5 @@ pandas==3.0.6
 pyarrow==25.0.1
 stable_baselines3==2.3.2
 torch==2.14.1
+# MLflow 모델 저장소에서 서빙 모델을 받고 실험을 등록하는 클라이언트 (서버는 Dockerfile.mlflow)
+mlflow-skinny==3.17.2

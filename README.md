@@ -57,6 +57,7 @@
     │   ├── test_guard_backtest.py  # Safe-Guard 끔/켬 폐루프 백테스트·공개 결과 대조
     │   ├── test_learning_curves.py  # 학습 곡선: 120개 실행·10만 스텝 이상, 요약 계산, 전달
     │   ├── test_explain.py  # SHAP 설명 경로: 설명 전용 인스턴스·합성 데모 허용·그림 프록시
+    │   ├── test_mlops.py    # MLflow: 모델 URI, 등록 기록(개인 경로 제외), 서빙 모델 출처·대체
     │   ├── test_dashboard.py  # 시계열 API, 실데이터·오프라인 페이지 렌더링 검증
     │   └── conftest.py      # 테스트용 백테스트 결과 CSV·리스크 태그 준비
     ├── scripts/
@@ -65,7 +66,10 @@
     ├── data/learning_curves.csv  # PPO 학습 곡선 (보상 5종 × 구간 4 × seed 3 × 최종·선택용)
     ├── Dockerfile           # Gateway·대시보드 컨테이너 이미지 빌드 명세
     ├── Dockerfile.rl        # RL 서빙 전용 이미지 (torch CPU, 모델 번들·rl-engine 코드 고정)
-    ├── requirements-rl.txt  # RL 서빙 의존성 (버전 고정)
+    ├── requirements-rl.txt  # RL 서빙 의존성 (버전 고정, MLflow 클라이언트 포함)
+    ├── Dockerfile.mlflow    # MLflow 추적 서버 이미지 (보너스 과제 3)
+    ├── requirements-mlflow.txt  # MLflow 서버 의존성 (버전 고정)
+    ├── mlops/               # MLflow 연동: 실험·모델 등록(register_experiments), 서빙 모델 조회(registry)
     ├── docker-compose.yml   # 전체 통합 실행 (팀원 레포 커밋 고정 빌드 + bootstrap)
     ├── docker-compose.local.yml  # 개발용: 형제 폴더(../) 코드로 빌드
     ├── .env.example         # 설정·선택 키 템플릿
@@ -364,13 +368,39 @@ Windows의 Docker Compose 5.1.x는 GitHub URL 빌드에 버그가 있어 헬퍼�
 
 ---
 
+## ⚙️ MLOps: MLflow 실험 추적·모델 버전 관리 (보너스 과제 3)
+
+docker compose에 MLflow(http://localhost:5000)를 추가했습니다. rl-engine 학습 결과를 실험으로 기록하고, 모델을 버전으로 관리하며, RL 서빙 서버는 모델 저장소에서 `production` 별칭이 붙은 버전을 받아 서빙합니다.
+
+| 서비스 | 하는 일 |
+|---|---|
+| `mlflow` | 추적 서버(5000). 실험 기록은 sqlite, 모델 체크포인트는 `mlflow-data` 볼륨에 저장 |
+| `mlflow-bootstrap` | 처음 한 번 rl-engine 결과를 기록하고 모델을 등록. 이미 있으면 건너뛰고, 서빙 모델(`RL_MODEL_NAME`)에 `production` 별칭만 다시 붙임 |
+| `rl-engine` | 시작할 때 `RL_MODEL_URI`(기본 `models:/ppo-portfolio@production`)의 버전을 내려받아 서빙. MLflow를 쓸 수 없으면 이미지 안의 파일 모델로 대체하고 사유를 `/health`에 남김 |
+
+**기록하는 내용**
+
+| 항목 | 내용 |
+|---|---|
+| 실험 `rl-engine-test` | 최종 모델 60개(보상 5종 × 구간 4 × seed 3). 설정(보상 함수·λ·seed·학습 구간·스텝 등), 테스트 구간 지표 14개, 학습 곡선(`train/ep_rew_mean`·`train/ep_len_mean`, 스텝별), 체크포인트(.zip·메타 .json) |
+| 실험 `rl-engine-val` | 보상 함수 선택용 학습 60개. 설정, 검증 구간 지표, 학습 곡선 |
+| 모델 `ppo-portfolio` | 최종 모델 60개를 버전으로 등록(태그: 모델 이름·보상 함수·구간·seed·출처). 현재 서빙 모델 `ppo_test_w4_simple_s42`에 `production` 별칭 |
+
+- 모델 메타 정보 중 학습한 PC의 개인 경로(`data_dir`)는 기록하지 않습니다.
+- 서빙 모델은 설정 파일이 기준입니다. `.env`의 `RL_MODEL_NAME`을 바꾸고 `docker compose up -d`를 하면 `production` 별칭이 그 버전으로 옮겨지고 RL 서버가 새 버전을 받습니다. MLflow 화면에서 별칭만 옮기면 다음 `up` 때 설정값으로 되돌아갑니다.
+- 대시보드 강화학습 성과 화면에 서빙 모델의 출처(MLflow 모델 이름·버전·별칭)가 표시됩니다.
+- MLflow 없이 실행하려면 `.env`에 `RL_MODEL_URI=`(빈 값)를 둡니다.
+- 한계: MLflow 서버에 인증이 없어 로컬·수업용으로만 씁니다. 데이터 수집·재학습 자동화는 다음 단계입니다.
+
+---
+
 ## 🧪 테스트와 코드 스타일
 
 5대 엔드포인트 등록 여부, 스키마 검증(422 방어), 비중 합 1.0 제약, 5초 이내 응답(SLA), 기준일 미래 정보 차단,
 RL 장애 시 대체 응답, 실제 성과 API(4년 연결·시드 평균·벤치마크 지표·Safe-Guard 구간), 시계열 API,
 리스크 태그 Safe-Guard(축소 규칙·상한 유지·미래 태그 차단·만료·태그 파일 없음·끔/켬 폐루프 백테스트),
 SHAP 설명 경로(설명 전용 인스턴스·합성 데모 허용·그림 프록시), ANOVA(검증 3종·국면 효과)·SHAP(실제·데모) 화면,
-실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 93개의 테스트를 포함합니다. 하위 서비스는 가짜 응답으로 대체해 정상 전달·422·503·504를 각각 확인합니다.
+실데이터·Gateway 오프라인 각각에서 대시보드 페이지 렌더링을 검증하는 99개의 테스트를 포함합니다. 하위 서비스는 가짜 응답으로 대체해 정상 전달·422·503·504를 각각 확인합니다.
 (CI에는 torch가 없으므로 RL 서버 테스트는 가짜 비중 표를 넣어 API 규칙을 검증합니다.)
 push·PR마다 GitHub Actions(`.github/workflows/ci.yml`)가 black·flake8·pytest와 Docker 이미지 빌드를 자동 실행합니다.
 

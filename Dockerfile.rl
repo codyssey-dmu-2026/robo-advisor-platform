@@ -20,8 +20,10 @@ ADD --checksum=sha256:d4b5df070fdcfd534cf08fec76e94b1aab5a3e9e7e0a6a9ca125132c37
 RUN python -m zipfile -e /tmp/models.zip /opt/rl-models && rm /tmp/models.zip
 
 COPY rl_server.py .
+# MLflow 연동(서빙 모델 조회·실험 등록)
+COPY mlops/ mlops/
 # 학습 곡선 (rl-engine TensorBoard 기록 변환본)
 COPY data/learning_curves.csv data/
-ENV RL_REPO_PATH=/opt/rl-engine RL_MODELS_DIR=/opt/rl-models/models
+ENV RL_REPO_PATH=/opt/rl-engine RL_MODELS_DIR=/opt/rl-models/models MLFLOW_DISABLE_AGENT_HINT=1
 EXPOSE 8002
 CMD ["uvicorn", "rl_server:app", "--host", "0.0.0.0", "--port", "8002"]

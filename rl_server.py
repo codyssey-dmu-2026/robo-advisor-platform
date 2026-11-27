@@ -4,6 +4,8 @@
 요청이 오면 그 표에서 찾아 돌려준다. rl-engine의 환경 코드를 그대로 쓰므로
 백테스트(eval_test_daily.csv)와 같은 비중이 나온다.
 모델·데이터는 환경 변수로 지정하므로 RL_MODEL_NAME만 바꾸면 모델을 교체할 수 있다.
+RL_MODEL_URI(예: models:/ppo-portfolio@production)를 주면 MLflow 모델 저장소에서
+그 별칭이 가리키는 버전을 내려받아 서빙한다.
 
 리스크 태그 Safe-Guard: agentic-research가 만든 위험 이벤트(RiskTag)를 읽어, 위험 신호가
 강한 자산의 비중을 줄인 뒤 응답한다 (과제의 "리스크 모니터링 모듈 연동"). 모델을 다시
@@ -15,6 +17,7 @@ import logging
 import math
 import os
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +37,12 @@ RL_REPO_PATH = Path(os.getenv("RL_REPO_PATH", _SIBLINGS / "rl-engine"))
 # 모델 파일 폴더, 사용할 모델 이름(.zip 제외), data-pipeline 결과 폴더
 RL_MODELS_DIR = Path(os.getenv("RL_MODELS_DIR", RL_REPO_PATH / "models"))
 RL_MODEL_NAME = os.getenv("RL_MODEL_NAME", "ppo_test_w4_simple_s42")
+# MLflow 모델 저장소의 모델 URI. 비우면 위 파일(RL_MODELS_DIR/RL_MODEL_NAME)을 쓴다
+RL_MODEL_URI = os.getenv("RL_MODEL_URI", "").strip()
+# MLflow에서 내려받은 체크포인트를 둘 폴더
+RL_MODEL_CACHE = Path(
+    os.getenv("RL_MODEL_CACHE", Path(tempfile.gettempdir()) / "rl-model-registry")
+)
 RL_DATA_DIR = Path(
     os.getenv("RL_DATA_DIR", _SIBLINGS / "data-pipeline" / "data" / "processed")
 )
@@ -121,6 +130,46 @@ class PolicySchedule:
         return index
 
 
+_REGISTRY: dict = {}  # MLflow에서 한 번 찾은 모델 (서버가 떠 있는 동안 고정)
+
+
+def model_source() -> dict:
+    """서빙할 모델의 이름·파일 폴더와 출처(file / mlflow).
+
+    MLflow에 연결하지 못하면 파일 모델로 대체하고 사유를 남긴다(서빙이 멈추지 않게).
+    """
+    if not RL_MODEL_URI:
+        return {"name": RL_MODEL_NAME, "dir": RL_MODELS_DIR, "source": "file"}
+    if not _REGISTRY:
+        try:
+            from mlops.registry import resolve_model
+
+            _REGISTRY.update(resolve_model(RL_MODEL_URI, RL_MODEL_CACHE))
+            logger.info(
+                "MLflow 모델 사용: %s → %s v%s",
+                RL_MODEL_URI,
+                _REGISTRY["name"],
+                _REGISTRY["version"],
+            )
+        except Exception as error:
+            logger.warning("MLflow 모델을 쓸 수 없어 파일 모델로 대체 (%s)", error)
+            _REGISTRY.update(
+                {
+                    "name": RL_MODEL_NAME,
+                    "dir": RL_MODELS_DIR,
+                    "source": "file",
+                    "uri": RL_MODEL_URI,
+                    "fallback_reason": f"{type(error).__name__}: {error}",
+                }
+            )
+    return dict(_REGISTRY)
+
+
+def model_source_info() -> dict:
+    """/health용: 폴더 경로는 빼고 출처 정보만."""
+    return {k: str(v) for k, v in model_source().items() if k != "dir"}
+
+
 @dataclass(frozen=True)
 class Policy:
     """학습된 모델과 rl-engine 평가 환경. 같은 환경으로 비중표·백테스트를 재생한다."""
@@ -195,7 +244,8 @@ def _load_policy() -> Policy:
     from model_meta import check_compatible, load_meta
     from rollout import build_test_env
 
-    path = RL_MODELS_DIR / f"{RL_MODEL_NAME}.zip"
+    source = model_source()
+    path = source["dir"] / f"{source['name']}.zip"
     if not path.is_file():
         raise FileNotFoundError(f"모델 파일이 없습니다: {path}")
     meta = load_meta(path)
@@ -207,7 +257,7 @@ def _load_policy() -> Policy:
     check_compatible(meta, data, env)  # 자산 순서·입력 크기가 다르면 여기서 중단
     model = PPO.load(str(path), device="cpu")
     return Policy(
-        model_name=RL_MODEL_NAME,
+        model_name=source["name"],
         tickers=list(data.tickers),
         max_weight=float(meta["max_weight"]),
         model=model,
@@ -525,9 +575,11 @@ def _schedule_weights() -> Optional[dict]:
 
 
 def _build_performance() -> dict:
-    """현재 모델(RL_MODEL_NAME)과 같은 설정으로 구간마다 재학습한 Walk-Forward 성과."""
+    """현재 모델과 같은 설정으로 구간마다 재학습한 Walk-Forward 성과."""
+    source = model_source()
+    model_name = source["name"]
     meta = json.loads(
-        (RL_MODELS_DIR / f"{RL_MODEL_NAME}.json").read_text(encoding="utf-8")
+        (source["dir"] / f"{model_name}.json").read_text(encoding="utf-8")
     )
     strategy, seed = f"PPO-{meta['variant']}", str(meta["seed"])
 
@@ -632,7 +684,7 @@ def _build_performance() -> dict:
     return {
         "status": "ok",
         "data_mode": "real",
-        "model_name": RL_MODEL_NAME,
+        "model_name": model_name,
         "strategy": strategy,
         "seed": seed,
         "benchmark": BENCHMARK,
@@ -658,7 +710,9 @@ def _published_daily() -> Optional[pd.Series]:
     """rl-engine이 공개한 현재 모델의 일별 수익률 (재생 결과 대조용). 없으면 None."""
     try:
         meta = json.loads(
-            (RL_MODELS_DIR / f"{RL_MODEL_NAME}.json").read_text(encoding="utf-8")
+            (model_source()["dir"] / f"{model_source()['name']}.json").read_text(
+                encoding="utf-8"
+            )
         )
         daily = pd.read_csv(RL_RESULTS_DIR / "eval_test_daily.csv", dtype={"seed": str})
     except (OSError, ValueError, KeyError):
@@ -832,6 +886,8 @@ def health_check():
         "safeguard_mdd_limit": 0.15,
         "risk_tags_loaded": tags is not None,
         "risk_tag_count": 0 if tags is None else int(len(tags)),
+        # 모델 출처: 파일 또는 MLflow 모델 저장소(버전·별칭)
+        "model_source": model_source_info(),
     }
     try:
         schedule = get_schedule()
@@ -883,7 +939,7 @@ def build_learning_curves(frame: pd.DataFrame) -> dict:
     return {
         "status": "ok",
         "metric": "rollout/ep_rew_mean",
-        "current_model": RL_MODEL_NAME,
+        "current_model": model_source()["name"],
         "run_count": len(runs),
         "runs": runs,
         "note": (
