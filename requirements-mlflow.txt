@@ -1,0 +1,2 @@
+# MLflow 추적 서버 전용 의존성 (Dockerfile.mlflow). 실험 추적·모델 저장소 UI (보너스 과제 3)
+mlflow==3.17.2

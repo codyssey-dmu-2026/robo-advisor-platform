@@ -32,6 +32,28 @@ def fmt(value: float | None, kind: str) -> str:
     return f"{value:.2%}" if kind == "pct" else f"{value:.3f}"
 
 
+def model_source_caption() -> str | None:
+    """서빙 모델의 출처 (MLflow 모델 저장소 버전 또는 파일)."""
+    try:
+        rl = api.health().get("services", {}).get("rl_engine", {})
+    except api.ApiError:
+        return None
+    source = rl.get("model_source") or {}
+    if source.get("source") == "mlflow":
+        return (
+            f":material/inventory_2: 서빙 모델 출처: MLflow 모델 저장소 "
+            f"`{source.get('registered_model')}` v{source.get('version')} "
+            f"(별칭 `{source.get('alias')}`) · 실험 기록과 모델 버전은 "
+            "[MLflow 화면](http://localhost:5000)에서 볼 수 있습니다."
+        )
+    if source.get("fallback_reason"):
+        return (
+            ":material/warning: MLflow 모델 저장소를 쓸 수 없어 이미지 안의 파일 모델로 "
+            f"서빙 중입니다 ({source['fallback_reason']})."
+        )
+    return None
+
+
 # 학습 곡선: 과제 필수 3종을 윗줄, MDD λ 탐색 2개를 아랫줄에 둔다
 VARIANTS = {
     "simple": "단순 수익률 (r_t)",
@@ -171,6 +193,9 @@ if perf:
             "(시험 구간 성적을 보고 고르면 미래 정보 누수가 되므로). "
             "API 응답 시간 기준(5초 이내)은 테스트 코드로 확인합니다."
         )
+        source = model_source_caption()
+        if source:
+            st.caption(source)
 
     tab_cmp, tab_table, tab_curve = st.tabs(
         [

@@ -263,6 +263,12 @@ def online_gateway(perf_results, write_tags, monkeypatch):
                     "status": "ok",
                     "as_of_min": "2025-01-03",
                     "as_of_max": "2025-01-07",
+                    "model_source": {
+                        "source": "mlflow",
+                        "registered_model": "ppo-portfolio",
+                        "version": "58",
+                        "alias": "production",
+                    },
                 }
             },
         },
@@ -362,6 +368,8 @@ def test_24_performance_page_shows_learning_curves(online_gateway):
     assert len(table) == 2 and set(table["seed"]) == {42, 43}
     assert table["학습 스텝"].min() >= 100_000
     assert any("기록 없음" in c.value for c in at.caption)  # 다른 보상 함수 칸
+    # 서빙 모델 출처: MLflow 모델 저장소 버전
+    assert any("`ppo-portfolio` v58" in c.value for c in at.caption)
 
 
 def test_23_risk_page_compares_guard_on_and_off(online_gateway):

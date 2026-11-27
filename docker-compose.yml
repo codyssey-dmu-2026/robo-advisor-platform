@@ -247,6 +247,42 @@ services:
       - robo-net
     restart: unless-stopped
 
+  # ---------------------------------------------------------------
+  # MLOps (보너스 과제 3): MLflow 실험 추적·모델 저장소 (http://localhost:5000)
+  # ---------------------------------------------------------------
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: robo-mlflow:local
+    container_name: robo-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      <<: *health
+    networks:
+      - robo-net
+    restart: unless-stopped
+
+  # 처음 한 번: rl-engine 학습 결과(최종 60 + 선택용 60)를 기록하고 최종 모델 60개를 등록한다.
+  # 이미 등록돼 있으면 건너뛰고, 서빙 모델(RL_MODEL_NAME)에 production 별칭만 다시 붙인다
+  mlflow-bootstrap:
+    image: robo-rl:local
+    container_name: robo-mlflow-bootstrap
+    command: python -m mlops.register_experiments
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      SERVING_MODEL: ${RL_MODEL_NAME:-ppo_test_w4_simple_s42}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    networks:
+      - robo-net
+    restart: "no"
+
   # 3. RL Optimization Serving Service (Port 8002)
   #   학습된 PPO 모델의 목표 비중을 서빙하고, agent-bootstrap이 만든 RiskTag를
   #   읽기 전용으로 받아 위험 신호가 강한 자산 비중을 줄인다 (리스크 태그 Safe-Guard)
@@ -260,6 +296,10 @@ services:
       - "8002:8002"
     environment:
       RL_MODEL_NAME: ${RL_MODEL_NAME:-ppo_test_w4_simple_s42}
+      # MLflow 모델 저장소에서 production 별칭이 붙은 버전을 서빙한다.
+      # 비우면(RL_MODEL_URI=) MLflow 없이 이미지 안의 파일 모델(RL_MODEL_NAME)을 쓴다
+      RL_MODEL_URI: ${RL_MODEL_URI-models:/ppo-portfolio@production}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       RL_DATA_DIR: /pipeline-data/processed
       # 리스크 태그 Safe-Guard: 태그 파일이 없으면 모델 비중 그대로 응답
       RISK_TAGS_PATH: /agent-artifacts/risk_tags.jsonl
@@ -272,6 +312,8 @@ services:
       data-bootstrap:
         condition: service_completed_successfully
       agent-bootstrap:
+        condition: service_completed_successfully
+      mlflow-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
@@ -339,6 +381,7 @@ volumes:
   pipeline-data:
   agent-artifacts:
   eval-artifacts:
+  mlflow-data:
 
 networks:
   robo-net:
